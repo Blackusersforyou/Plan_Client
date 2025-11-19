@@ -1,3 +1,5 @@
+ï»¿#include <stdint.h>
+#include <Windows.h>
 
 #define PI 3.1415926
 typedef struct{
@@ -11,14 +13,14 @@ typedef struct{
 }Point;
 typedef struct{
 	INT16 Timestamp;           //Timestamp
-	INT16 Runstatus;           //Runstatus£º0£ºShutdown£¬1£ºdefauted 2£ºrunning
+	INT16 Runstatus;           //Runstatusï¼š0ï¼šShutdownï¼Œ1ï¼šdefauted 2ï¼šrunning
 	BYTE task_finish;          //task_finish
 	BYTE detect_object;        //detect target
 	BYTE collision;            //collision label
 	INT16 obstacle[360];       //Laser information, 0 degree for forward direction
 	POSE initial_rpose;        //initial pose of robot,0 means invalid
 	Point initial_dpose;       //initial pose of target,0 means invalid
-	double target_angle;       //Target direction in robot coordinates frame£¬clockwise for [0,PI],anticlockwise[0, -PI];
+	double target_angle;       //Target direction in robot coordinates frameï¼Œclockwise for [0,PI],anticlockwise[0, -PI];
 }S2CINFO;
 typedef struct{
 	INT16 Timestamp;           //Timestamp 1 for 0.2 seconds

@@ -143,6 +143,7 @@
     <ClCompile Include="Plan_Client.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="PathPlanner.h" />
     <ClInclude Include="StructData.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

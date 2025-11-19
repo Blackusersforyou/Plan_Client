@@ -60,14 +60,11 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 				C2Sdata.Runstatus = S2Cdata.Runstatus;
 				memcpy(obstacle, S2Cdata.obstacle, 360 * sizeof(INT16));
 				//Add global path here
-				
-
 				//C2Sdata.Traj[0].coor_x = Initial_rPos.coor_x;
 				//C2Sdata.Traj[0].coor_y = Initial_rPos.coor_y;
 				//C2Sdata.Traj[1].coor_x = Cur_dPos.coor_x;
 				//C2Sdata.Traj[1].coor_y = Cur_dPos.coor_y;
 				//Add localization of robot here
-
 				if (S2Cdata.detect_object > 0)
 					S2Cdata.detect_object = S2Cdata.detect_object;
 				Cur_rPos.coor_ori = Cur_rPos.coor_ori + cur_rot_vel*0.2;
@@ -77,8 +74,6 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 				C2Sdata.cur_rpose.coor_y = Cur_rPos.coor_y;
 				C2Sdata.cur_rpose.coor_ori = Cur_rPos.coor_ori;
 				//Add plan code here
-
-
 				C2Sdata.tra_vel = 30;
 				C2Sdata.rot_vel = -0.15;
 				cur_tra_vel = 30;
