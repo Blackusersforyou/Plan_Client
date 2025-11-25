@@ -86,6 +86,7 @@ public:
 		for (int i = 0; i < 360; i++) {
 			if (laser_data[i] <= 0 || laser_data[i] > 5000) continue;
 			
+			// ✅ 保留原有的正确逻辑
 			double angle = (i * PI / 180.0);
 			if (angle > PI) angle -= 2 * PI;
 			

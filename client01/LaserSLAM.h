@@ -437,6 +437,20 @@ public:
 		worldToGrid(cur_pose.coor_x, cur_pose.coor_y, robot_gx, robot_gy);
 		recordVisit(robot_gx, robot_gy);
 
+		// ✅ 强制清除机器人当前位置周围 7×7 区域（35cm）
+		for (int di = -3; di <= 3; di++) {
+			for (int dj = -3; dj <= 3; dj++) {
+				int ni = robot_gy + di;
+				int nj = robot_gx + dj;
+				if (ni >= 0 && ni < GRID_HEIGHT && nj >= 0 && nj < GRID_WIDTH) {
+					// 强制清空机器人周围区域
+					map->grid[ni][nj].occupancy = 0;
+					map->grid[ni][nj].hit_count = 0;
+					map->grid[ni][nj].miss_count = 10;
+				}
+			}
+		}
+
 		for (int i = 0; i < 360; i += 2) {
 			if (laser_data[i] > 0 && laser_data[i] < 3000) {
 				double angle = cur_pose.coor_ori + (i * PI / 180.0);
@@ -445,6 +459,14 @@ public:
 
 				INT16 obs_gx, obs_gy;
 				worldToGrid(obs_x, obs_y, obs_gx, obs_gy);
+				
+				// ✅ 跳过机器人周围区域，避免标记为障碍
+				int dx = abs(obs_gx - robot_gx);
+				int dy = abs(obs_gy - robot_gy);
+				if (dx <= 3 && dy <= 3) {
+					continue;  // 不更新机器人周围 7×7 区域
+				}
+				
 				rayTraceWithProbability(robot_gx, robot_gy, obs_gx, obs_gy);
 			}
 		}
@@ -674,17 +696,68 @@ public:
 	
 	// ✅ 新增:物理确认目标
 	void confirmTargetPhysically(double world_x, double world_y) {
+		INT16 detection_gx, detection_gy;
+		worldToGrid(world_x, world_y, detection_gx, detection_gy);
+		
+		// ✅ 检查是否是机器人自己
+		INT16 robot_gx, robot_gy;
+		worldToGrid(robot_pose.coor_x, robot_pose.coor_y, robot_gx, robot_gy);
+		
+		double dist_to_robot = sqrt(pow(detection_gx - robot_gx, 2) + 
+									pow(detection_gy - robot_gy, 2));
+		
+		// ✅ 提高距离阈值：<5个栅格(25cm)忽略
+		if (dist_to_robot < 5.0) {
+			std::cout << ">>> Ignored self-detection (too close to robot, dist=" 
+					  << (int)(dist_to_robot * 5) << "cm)" << std::endl;
+			return;
+		}
+		
+		// ✅ 检查是否已经确认过该位置
+		static INT16 last_confirmed_gx = -1;
+		static INT16 last_confirmed_gy = -1;
+		
+		if (abs(detection_gx - last_confirmed_gx) < 3 && 
+			abs(detection_gy - last_confirmed_gy) < 3) {
+			// 同一位置不重复确认
+			return;
+		}
+		
 		for (auto& candidate : target_candidates) {
 			double dx = candidate.position.coor_x - world_x;
 			double dy = candidate.position.coor_y - world_y;
 			double distance = sqrt(dx*dx + dy*dy);
 			
-			if (distance < 30.0) {  // 30cm内
+			if (distance < 30.0) {
 				candidate.physically_confirmed = true;
-				candidate.confidence = 1.0;  // 置信度提升到100%
-				std::cout << ">>> Target physically confirmed at (" 
-				          << candidate.position.coor_x << "," 
-				          << candidate.position.coor_y << ")" << std::endl;
+				candidate.confidence = 1.0;
+				
+				// ✅ 只清除一次
+				if (last_confirmed_gx != candidate.grid_x || 
+					last_confirmed_gy != candidate.grid_y) {
+					
+					// 清除目标周围 9×9 区域
+					for (int di = -4; di <= 4; di++) {
+						for (int dj = -4; dj <= 4; dj++) {
+							int ni = candidate.grid_y + di;
+							int nj = candidate.grid_x + dj;
+							if (ni >= 0 && ni < GRID_HEIGHT && 
+								nj >= 0 && nj < GRID_WIDTH) {
+								map->grid[ni][nj].occupancy = 0;
+								map->grid[ni][nj].hit_count = 0;
+								map->grid[ni][nj].miss_count = 30;
+							}
+						}
+					}
+					
+					last_confirmed_gx = candidate.grid_x;
+					last_confirmed_gy = candidate.grid_y;
+					
+					std::cout << ">>> Target confirmed at (" 
+							  << candidate.position.coor_x << "," 
+							  << candidate.position.coor_y 
+							  << "), cleared 9x9 region" << std::endl;
+				}
 				break;
 			}
 		}

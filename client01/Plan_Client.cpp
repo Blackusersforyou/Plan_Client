@@ -1,4 +1,5 @@
 ﻿#include <iostream>
+#include <iomanip> 
 #include <stdlib.h>
 #include <stdio.h>
 #include <atlstr.h>
@@ -283,191 +284,163 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 						target_visible = false;
 					}
 					else {
-							// 声明变量
-							double planned_vel = 0;
-							double planned_rot = 0;
-							
-							frames_since_replan++;
-							double exploration_progress = slam_system->getExplorationProgress();
-							
-							// ✅ 目标检测
-				bool target_position_known = (target_point.coor_x != 0 || target_point.coor_y != 0);
-				bool target_laser_visible = slam_system->isTargetVisible(target_point, obstacle);
-				bool target_physically_detected = (S2Cdata.detect_object > 0);
-				bool direct_path_clear = slam_system->isDirectPathClear(target_point, obstacle, 80.0);
-
-				// ✅ 关键修复：目标位置已知就应该使用目标导向模式
-				if (target_position_known) {
-				    // 位置已知，即使暂时看不见也应该朝目标方向前进
-				    target_visible = true;
-				    
-				    // ✅ 添加详细调试输出
-				    static int visibility_log = 0;
-				    if (++visibility_log % 50 == 0) {
-				        cout << ">> Target Status: position_known=YES"
-				             << ", laser_visible=" << (target_laser_visible ? "YES" : "NO")
-				             << ", physical=" << (target_physically_detected ? "YES" : "NO")
-				             << ", path_clear=" << (direct_path_clear ? "YES" : "NO")
-				             << ", dist=" << (int)dist_to_target << "cm" << endl;
-				    }
-				} else {
-				    target_visible = false;
-				}
-
-							// 综合判断：用于显示状态
-							if (target_physically_detected) {
-									target_visible = true;
-							}
-							else if (target_laser_visible && dist_to_target < 600.0) {
-									target_visible = true;
-							}
-							else {
-									target_visible = false;
-							}
-
-							// ✅ 核心修改：Object Find 状态时优先使用 A*
-							// 优先级：
-							// 1. A* 模式：Object Find (target_visible=true) + 距离合适 + 已探索
-							// 2. 直达模式：距离很近 (<=50cm)
-							// 3. 探索模式：目标不可见
-							
-							if (target_visible && dist_to_target > 50.0 && dist_to_target < 600.0 && 
-							    exploration_progress > 0.03) {
-									// ✅ 优先级1：A* 模式 - Object Find 状态，使用最优路径规划
-									if (!using_astar || frames_since_replan > 25) {
-											cout << ">> [A* MODE] Object detected, planning optimal path" << endl;
-											cout << "   Target: visible=" << target_visible 
-											     << ", laser=" << target_laser_visible
-											     << ", physical=" << target_physically_detected
-											     << ", dist=" << (int)dist_to_target << "cm" << endl;
-											cout << "   Path: " << (direct_path_clear ? "CLEAR" : "BLOCKED") << endl;
-											
-											if (astar_planner->planPath(Cur_rPos, target_point, astar_path, path_length)) {
-													using_astar = true;
-													frames_since_replan = 0;
-													
-													for (int i = 0; i < (std::min)(path_length, 100); i++) {
-														C2Sdata.Traj[i] = astar_path[i];
-													}
-													
-													cout << "   [OK] A* path: " << path_length << " waypoints" << endl;
-											}
-											else {
-													using_astar = false;
-													cout << "   [FAIL] A* failed, fallback to direct mode" << endl;
-											}
-									}
-									
-									if (using_astar && path_length > 0) {
-											// 跟随 A* 路径
-											astar_planner->followPath(Cur_rPos, astar_path, path_length, obstacle,
-																  planned_vel, planned_rot);
-									}
-									else {
-											// A* 失败，直达模式
-											if (direct_path_clear) {
-													// 路径畅通，直接冲刺
-													double target_dx = target_point.coor_x - Cur_rPos.coor_x;
-													double target_dy = target_point.coor_y - Cur_rPos.coor_y;
-													double target_angle = atan2(target_dy, target_dx);
-													double angle_error = target_angle - Cur_rPos.coor_ori;
-													
-													while (angle_error > PI) angle_error -= 2 * PI;
-													while (angle_error < -PI) angle_error += 2 * PI;
-													
-													if (fabs(angle_error) > 0.6) {
-															planned_vel = 18.0;
-															planned_rot = (angle_error > 0) ? 0.5 : -0.5;
-													} else if (fabs(angle_error) > 0.3) {
-															planned_vel = 30.0;
-															planned_rot = angle_error * 1.2;
-													} else {
-															if (dist_to_target > 100.0) {
-																	planned_vel = 45.0;
-															} else if (dist_to_target > 50.0) {
-																	planned_vel = 35.0;
-															} else {
-																	planned_vel = 25.0;
-															}
-															planned_rot = angle_error * 0.8;
-													}
-											}
-											else {
-													// 路径有障碍，使用导向模式
-													openness_planner->computeMotionDirection(Cur_rPos, target_point, obstacle,
-																					   planned_vel, planned_rot, true);
-											}
-									}
-							}
-							else if (target_visible && dist_to_target <= 50.0) {
-									// ✅ 优先级2：近距离接近模式
-									cout << ">> [APPROACH MODE] Final approach (dist: " << (int)dist_to_target << "cm)" << endl;
-									using_astar = false;
-									
-									double target_dx = target_point.coor_x - Cur_rPos.coor_x;
-									double target_dy = target_point.coor_y - Cur_rPos.coor_y;
-									double target_angle = atan2(target_dy, target_dx);
-									double angle_error = target_angle - Cur_rPos.coor_ori;
-									
-									while (angle_error > PI) angle_error -= 2 * PI;
-									while (angle_error < -PI) angle_error += 2 * PI;
-									
-									if (fabs(angle_error) > 0.5) {
-											planned_vel = 12.0;
-											planned_rot = (angle_error > 0) ? 0.5 : -0.5;
-									} else {
-											planned_vel = 20.0;
-											planned_rot = angle_error * 1.5;
-									}
-							}
-							else {
-									// ✅ 优先级3：探索模式（目标不可见或距离/探索度不满足）
-									if (using_astar) {
-											cout << ">> [EXPLORE MODE] Target lost or conditions not met" << endl;
-											cout << "   visible=" << target_visible 
-											     << ", dist=" << (int)dist_to_target
-											     << ", explored=" << (int)(exploration_progress*100) << "%" << endl;
-											using_astar = false;
-											path_length = 0;
-									}
-									
-									openness_planner->computeMotionDirection(Cur_rPos, target_point, obstacle,
-																		   planned_vel, planned_rot, false);
-							}
-							
-							// 5. 障碍物避让调整
-							obstacle_avoidance->computeAvoidanceVelocity(planned_vel, planned_rot,
-																	 cur_tra_vel, cur_rot_vel, obstacle);
-							
-							// 碰撞检测
-							if (current_collision) {
-								cur_tra_vel = 0;
-								cur_rot_vel = 0;
-							}
-					}
-					
-					// 每30帧输出一次信息
-					if (frame_count % 30 == 0 && frame_count > 0) {
-						ObstacleInfo front, left, right;
-						obstacle_avoidance->getObstacleInfo(front, left, right);
-						double exploration_progress = slam_system->getExplorationProgress();
+						// 声明变量
+						double planned_vel = 0;
+						double planned_rot = 0;
 						
-						// ✅ 新增：显示路径状态
-						bool direct_clear = slam_system->isDirectPathClear(target_point, obstacle, 80.0);
+						frames_since_replan++;
 						
-						cout << "F:" << frame_count 
-						     << " Pos:(" << Cur_rPos.coor_x << "," << Cur_rPos.coor_y << ")"
-						     << " Dist:" << (int)dist_to_target
-						     << " Mode:" << (using_astar ? "[A*]" : (target_visible ? (direct_clear ? "[DIRECT]" : "[GUIDED]") : "[EXPLORE]"))
-						     << (obstacle_avoidance->isInRecoveryMode() ? " [RECOVERY]" : "")
-						     << (current_collision ? " [COLLISION!]" : "")
-						     << " PathClear:" << (direct_clear ? "YES" : "NO")
-						     << " Explored:" << (int)(exploration_progress*100) << "%"
-						     << " Obs:[F:" << (int)front.distance 
-						     << " L:" << (int)left.distance 
-						     << " R:" << (int)right.distance << "]"
-						     << " V:" << (int)cur_tra_vel << " W:" << cur_rot_vel << endl;
-					}
+						// 计算距离
+						double dist_to_target = sqrt(pow(target_point.coor_x - Cur_rPos.coor_x, 2) +
+													 pow(target_point.coor_y - Cur_rPos.coor_y, 2));
+
+    // ✅ 简化的决策逻辑：仅依赖 detect_object 和 task_finish
+    bool object_detected = (S2Cdata.detect_object > 0);
+    bool task_finished = (S2Cdata.task_finish > 0);
+    bool target_known = (target_point.coor_x != 0 || target_point.coor_y != 0);
+
+    // 检查任务完成状态
+    if (task_finished) {
+        cout << "====== TASK FINISHED! ======" << endl;
+        cout << "Target contacted successfully!" << endl;
+        cur_tra_vel = 0;
+        cur_rot_vel = 0;
+        first_frame_done = false;
+    }
+    else if (object_detected) {
+        // ✅ 激光传感器检测到目标：使用 A* 规划
+        
+        // 每25帧或首次检测到时重新规划路径
+        if (!using_astar || frames_since_replan > 25) {
+            cout << ">> [A* MODE] Laser sensor detected target" << endl;
+            cout << "   Distance: " << (int)dist_to_target << "cm" << endl;
+            
+            if (astar_planner->planPath(Cur_rPos, target_point, astar_path, path_length)) {
+                using_astar = true;
+                frames_since_replan = 0;
+                
+                // 将路径存入通信数据（用于可视化）
+                for (int i = 0; i < (std::min)(path_length, 100); i++) {
+                    C2Sdata.Traj[i] = astar_path[i];
+                }
+                
+                cout << "   [OK] A* planned: " << path_length << " waypoints" << endl;
+            }
+            else {
+                using_astar = false;
+                cout << "   [FAIL] A* failed, using direct approach" << endl;
+            }
+        }
+        
+        if (using_astar && path_length > 0) {
+            // ✅ 跟随 A* 路径，并应用避障
+            astar_planner->followPath(Cur_rPos, astar_path, path_length, obstacle,
+                                  planned_vel, planned_rot);
+            
+            // ✅ 使用避障调整（恢复原始行为）
+            obstacle_avoidance->computeAvoidanceVelocity(planned_vel, planned_rot,
+                                                     cur_tra_vel, cur_rot_vel, obstacle);
+        }
+        else {
+            // A* 失败或路径为空，直接朝向目标
+            double target_dx = target_point.coor_x - Cur_rPos.coor_x;
+            double target_dy = target_point.coor_y - Cur_rPos.coor_y;
+            double target_angle = atan2(target_dy, target_dx);
+            double angle_error = target_angle - Cur_rPos.coor_ori;
+            
+            while (angle_error > PI) angle_error -= 2 * PI;
+            while (angle_error < -PI) angle_error += 2 * PI;
+            
+            // 根据角度误差调整速度
+            if (fabs(angle_error) > 0.6) {
+                planned_vel = 18.0;
+                planned_rot = (angle_error > 0) ? 0.5 : -0.5;
+            } else if (fabs(angle_error) > 0.3) {
+                planned_vel = 30.0;
+                planned_rot = angle_error * 1.2;
+            } else {
+                // 根据距离调整速度
+                if (dist_to_target > 100.0) {
+                    planned_vel = 45.0;
+                } else if (dist_to_target > 50.0) {
+                    planned_vel = 35.0;
+                } else {
+                    planned_vel = 25.0;
+                }
+                planned_rot = angle_error * 0.8;
+            }
+            
+            // ✅ 使用避障调整
+            obstacle_avoidance->computeAvoidanceVelocity(planned_vel, planned_rot,
+                                                     cur_tra_vel, cur_rot_vel, obstacle);
+        }
+    }
+    else {
+        // ✅ 未检测到目标：使用探索模式
+        if (using_astar) {
+            cout << ">> [EXPLORE] Target lost, switching to exploration" << endl;
+            using_astar = false;
+            path_length = 0;
+        }
+        
+        // 目标位置已知时，传入目标点引导探索方向
+        openness_planner->computeMotionDirection(Cur_rPos, target_point, obstacle,
+                                                 planned_vel, planned_rot, target_known);
+        
+        // ✅ 使用避障调整
+        obstacle_avoidance->computeAvoidanceVelocity(planned_vel, planned_rot,
+                                                     cur_tra_vel, cur_rot_vel, obstacle);
+    }
+    
+    // 碰撞检测
+    if (current_collision) {
+        cur_tra_vel = 0;
+        cur_rot_vel = 0;
+    }
+}
+
+// 每30帧输出一次信息
+if (frame_count % 30 == 0 && frame_count > 0) {
+    ObstacleInfo front, left, right;
+    obstacle_avoidance->getObstacleInfo(front, left, right);
+    
+    // ✅ 简化的状态输出
+    bool object_detected = (S2Cdata.detect_object > 0);
+    bool task_finished = (S2Cdata.task_finish > 0);
+    
+    cout << "F:" << frame_count 
+         << " Pos:(" << Cur_rPos.coor_x << "," << Cur_rPos.coor_y << ")"
+         << " Dist:" << (int)dist_to_target;
+    
+    // 显示当前模式
+    if (task_finished) {
+        cout << " [FINISHED]";
+    } else if (using_astar) {
+        cout << " [A*]";
+    } else {
+        cout << " [EXPLORE]";
+    }
+    
+    // 显示传感器状态
+    cout << " Sensor:" << (object_detected ? "DETECT" : "NONE");
+    
+    // 显示其他状态
+    if (obstacle_avoidance->isInRecoveryMode()) {
+        cout << " [RECOVERY]";
+    }
+    if (current_collision) {
+        cout << " [COLLISION!]";
+    }
+    
+    // 显示障碍物信息
+    cout << " Obs:[F:" << (int)front.distance 
+         << " L:" << (int)left.distance 
+         << " R:" << (int)right.distance << "]"
+         << " V:" << (int)cur_tra_vel 
+         << " W:" << std::fixed << std::setprecision(2) << cur_rot_vel 
+         << endl;
+}
+
 				}
 				else {
 					cur_tra_vel = 30;
