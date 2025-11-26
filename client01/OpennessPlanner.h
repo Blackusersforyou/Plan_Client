@@ -7,6 +7,7 @@
 #include <cmath>
 #include <algorithm>
 #include <iostream>
+#include "MathUtils.h"
 
 class OpennessPlanner {
 private:
@@ -198,8 +199,7 @@ public:
 
         // 2. ✅ 目标方向得分 - 使用更陡峭的函数
         double angle_diff = test_angle - target_angle;
-        while (angle_diff > PI) angle_diff -= 2 * PI;
-        while (angle_diff < -PI) angle_diff += 2 * PI;
+        angle_diff = MathUtils::normalizeAngle(angle_diff);
         
         double direction_score;
         if (target_visible) {

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <map>
 #include <iostream>
+#include "MathUtils.h"
 
 class AStarPlanner {
 private:

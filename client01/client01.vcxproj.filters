@@ -30,6 +30,9 @@
     <ClInclude Include="ObstacleAvoidance.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="MathUtils.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Plan_Client.cpp">
