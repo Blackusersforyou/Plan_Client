@@ -146,6 +146,7 @@
   <ItemGroup>
     <ClInclude Include="AStarPlanner.h" />
     <ClInclude Include="LaserSLAM.h" />
+    <ClInclude Include="MathUtils.h" />
     <ClInclude Include="ObstacleAvoidance.h" />
     <ClInclude Include="OpennessPlanner.h" />
     <ClInclude Include="StructData.h" />

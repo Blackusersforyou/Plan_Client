@@ -12,7 +12,6 @@ private:
 	OccupancyMap* map;
 	POSE robot_pose;
 	Point target_pose;
-	bool target_visible;
 	
 	// 访问历史记录
 	struct VisitRecord {
@@ -412,7 +411,6 @@ public:
 		std::cout << "Creating LaserSLAM with map size: " << GRID_WIDTH << "x" << GRID_HEIGHT << std::endl;
 		try {
 			map = new OccupancyMap();
-			target_visible = false;
 			current_frame = 0;
 			visit_history.reserve(500);
 			std::cout << "LaserSLAM initialized successfully" << std::endl;
@@ -583,12 +581,10 @@ public:
 		double distance = sqrt(dx*dx + dy*dy);
 		
 		if (distance > 1000.0) {
-			target_visible = false;
 			return false;
 		}
 		
 		if (distance < 30.0) {
-			target_visible = true;
 			return true;
 		}
 
@@ -597,7 +593,6 @@ public:
 		while (angle < -PI) angle += 2 * PI;
 
 		if (fabs(angle) > PI / 3.0) {
-			target_visible = false;
 			return false;
 		}
 
@@ -605,7 +600,6 @@ public:
 		if (laser_index < 0) laser_index += 360;
 		if (laser_index >= 360) laser_index -= 360;
 
-		bool visible = false;
 		int votes = 0;
 		int total_checks = 0;
 		for (int offset = -8; offset <= 8; offset++) {
@@ -622,17 +616,11 @@ public:
 			}
 		}
 		
-		visible = (total_checks > 0) && ((double)votes / total_checks >= 0.6);
-		target_visible = visible;
-		return visible;
+		return (total_checks > 0) && ((double)votes / total_checks >= 0.6);
 	}
 
 	OccupancyMap& getMap() {
 		return *map;
-	}
-
-	bool getTargetVisible() {
-		return target_visible;
 	}
 	
 	double getExplorationProgress() {

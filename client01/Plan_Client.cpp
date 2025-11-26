@@ -11,6 +11,7 @@
 #include "ObstacleAvoidance.h"
 #include "OpennessPlanner.h"
 #include "AStarPlanner.h"
+#include "MathUtils.h"
 
 #pragma comment(lib,"ws2_32.lib")
 using namespace std;
@@ -87,9 +88,13 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 	bool using_astar = false;
 	int frames_since_replan = 0;
 	bool first_frame_done = false;
-	bool target_visible = false;
 	bool last_collision_state = false;
-	bool actually_reached = false;  // ✅ 添加这一行,在函数开始处声明
+	
+	POSE Last_Initial_rPos;
+	memset(&Last_Initial_rPos, 0, sizeof(POSE));
+	bool pose_initialized = false;
+	
+	bool robot_angle_known = false;
 	
 	while (Runstatus > 0){
 		try {
@@ -107,76 +112,98 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 					break;
 				}
 				
-				// ✅ 问题2解决：碰撞后立即重置环境
+				// 检测机器人初始位姿是否发生变化
+				bool pose_changed = false;
+				if (pose_initialized && first_frame_done) {
+					POSE current_initial_pose = S2Cdata.initial_rpose;
+					
+					if (MathUtils::isPoseSignificantlyDifferent(
+						current_initial_pose, Last_Initial_rPos, 30.0, 0.3)) {
+						pose_changed = true;
+						cout << "====== POSE CHANGE DETECTED! ======" << endl;
+						cout << "   Previous: (" << Last_Initial_rPos.coor_x << ", " 
+						     << Last_Initial_rPos.coor_y << ", " 
+						     << Last_Initial_rPos.coor_ori << ")" << endl;
+						cout << "   Current:  (" << current_initial_pose.coor_x << ", " 
+						     << current_initial_pose.coor_y << ", " 
+						     << current_initial_pose.coor_ori << ")" << endl;
+						
+						first_frame_done = false;
+						S2Cdata.Timestamp = 0;
+					}
+				}
+				
+				// 碰撞检测与重置
 				bool current_collision = (S2Cdata.collision > 0);
 				if (current_collision && !last_collision_state) {
-					// 检测到碰撞的上升沿（从无碰撞到碰撞）
 					cout << "====== COLLISION DETECTED - FULL RESET ======" << endl;
-					
-					// 立即停止
 					cur_tra_vel = 0;
 					cur_rot_vel = 0;
 					
-					// 完全重置所有状态
-					if (obstacle_avoidance) {
-						obstacle_avoidance->reset();
-						cout << "   Obstacle avoidance reset" << endl;
-					}
+					if (obstacle_avoidance) obstacle_avoidance->reset();
+					if (openness_planner) openness_planner->reset();
 					
-					if (openness_planner) {
-						openness_planner->reset();
-						cout << "   Openness planner reset" << endl;
-					}
-					
-					// 重置路径规划状态
 					using_astar = false;
 					path_length = 0;
 					frames_since_replan = 0;
-					
-					cout << "Waiting for manual repositioning..." << endl;
 				}
 				last_collision_state = current_collision;
 				
-				// 第一帧初始化
+				// ✅ 第一帧初始化
 				if(S2Cdata.Timestamp == 0 && !first_frame_done){
 					cout << "====== NEW SCENE ======" << endl;
 					cout << "First frame received" << endl;
+					
 					memcpy(&Initial_rPos, &S2Cdata.initial_rpose, sizeof(POSE));
 					memcpy(&Cur_rPos, &S2Cdata.initial_rpose, sizeof(POSE));
+					memcpy(&Last_Initial_rPos, &S2Cdata.initial_rpose, sizeof(POSE));
+					pose_initialized = true;
+					
+					// 判断机器人实时角度是否已知
+					if (fabs(S2Cdata.target_angle) > PI) {
+						robot_angle_known = false;
+						cout << "Robot angle: UNKNOWN (will estimate from motion)" << endl;
+					} else {
+						robot_angle_known = true;
+						Cur_rPos.coor_ori = S2Cdata.target_angle;
+						cout << "Robot angle: KNOWN (" << S2Cdata.target_angle << " rad)" << endl;
+					}
+					
+					// 目标点坐标
 					Cur_dPos.coor_x = S2Cdata.initial_dpose.coor_x;
 					Cur_dPos.coor_y = S2Cdata.initial_dpose.coor_y;
 					Cur_dPos.coor_ori = 0;
 					
 					cout << "Robot pos: (" << Initial_rPos.coor_x << ", " 
-					     << Initial_rPos.coor_y << "), ori: " << Initial_rPos.coor_ori << endl;
-					cout << "Target pos: (" << Cur_dPos.coor_x << ", " << Cur_dPos.coor_y << ")" << endl;
+					     << Initial_rPos.coor_y << "), ori: " 
+					     << Initial_rPos.coor_ori << endl;
+					cout << "Target pos: (" << Cur_dPos.coor_x << ", " 
+					     << Cur_dPos.coor_y << ")" << endl;
 					
-					double dist_to_target = sqrt(pow(Cur_dPos.coor_x - Initial_rPos.coor_x, 2) +
-					                             pow(Cur_dPos.coor_y - Initial_rPos.coor_y, 2));
+					double dist_to_target = MathUtils::calculateDistance(
+						Initial_rPos.coor_x, Initial_rPos.coor_y,
+						Cur_dPos.coor_x, Cur_dPos.coor_y);
 					cout << "Distance to target: " << (int)dist_to_target << " cm" << endl;
+					
+					// ✅ 坐标验证 - 仅在第一帧执行一次
+					cout << "=== Coordinate System Verification ===" << endl;
+					MathUtils::debugCoordinateConversion(Initial_rPos.coor_x, Initial_rPos.coor_y, "Robot Start");
+					MathUtils::debugCoordinateConversion(Cur_dPos.coor_x, Cur_dPos.coor_y, "Target");
+					
+					// 验证中间点
+					MathUtils::debugCoordinateConversion(300.0, 400.0, "Test Point 1");
+					MathUtils::debugCoordinateConversion(700.0, 600.0, "Test Point 2");
+					cout << "=======================================" << endl;
 					
 					using_astar = false;
 					path_length = 0;
 					frames_since_replan = 0;
 					frame_count = 0;
 					first_frame_done = true;
-					target_visible = false;
 					
-					// ✅ 修复问题3：完全重置所有状态
-					if (obstacle_avoidance) {
-						obstacle_avoidance->reset();
-						cout << "   Obstacle avoidance reset" << endl;
-					}
-					
-					if (openness_planner) {
-						openness_planner->reset();  // 使用新增的reset方法
-						cout << "   Openness planner reset" << endl;
-					}
-					
-					if (slam_system) {
-						slam_system->resetVisitHistory();
-						cout << "   SLAM visit history reset" << endl;
-					}
+					if (obstacle_avoidance) obstacle_avoidance->reset();
+					if (openness_planner) openness_planner->reset();
+					if (slam_system) slam_system->resetVisitHistory();
 					
 					cur_tra_vel = 0;
 					cur_rot_vel = 0;
@@ -188,31 +215,47 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 				C2Sdata.Runstatus = S2Cdata.Runstatus;
 				memcpy(obstacle, S2Cdata.obstacle, 360 * sizeof(INT16));
 				
-				// 修复问题2：位姿更新 - 仅在有控制指令时才更新
-				// 避免累积误差和鼠标拖动时的异常行为
+				// 位姿更新
 				if (frame_count > 0 && first_frame_done) {
-					double delta_ori = cur_rot_vel * 0.2;
-					double new_ori = Cur_rPos.coor_ori + delta_ori;
-					
-					double delta_x = cur_tra_vel * 0.2 * cos(new_ori);
-					double delta_y = cur_tra_vel * 0.2 * sin(new_ori);
-					
-					Cur_rPos.coor_ori = new_ori;
-					Cur_rPos.coor_x = (INT16)(Cur_rPos.coor_x + delta_x + 0.5);
-					Cur_rPos.coor_y = (INT16)(Cur_rPos.coor_y + delta_y + 0.5);
+					if (robot_angle_known) {
+						double delta_ori = cur_rot_vel * 0.2;
+						Cur_rPos.coor_ori = MathUtils::normalizeAngle(Cur_rPos.coor_ori + delta_ori);
+						
+						double delta_x = cur_tra_vel * 0.2 * cos(Cur_rPos.coor_ori);
+						double delta_y = cur_tra_vel * 0.2 * sin(Cur_rPos.coor_ori);
+						
+						Cur_rPos.coor_x = (INT16)(Cur_rPos.coor_x + delta_x + 0.5);
+						Cur_rPos.coor_y = (INT16)(Cur_rPos.coor_y + delta_y + 0.5);
+						
+						static int pose_log_counter = 0;
+						if (++pose_log_counter % 50 == 0) {
+							cout << "[POSE] x=" << Cur_rPos.coor_x << " y=" << Cur_rPos.coor_y 
+							     << " ori=" << (Cur_rPos.coor_ori * 180 / PI) << "deg"
+							     << " v=" << cur_tra_vel << " w=" << cur_rot_vel << endl;
+						}
+					} else {
+						double target_angle = MathUtils::calculateBearing(
+							Cur_rPos.coor_x, Cur_rPos.coor_y,
+							Cur_dPos.coor_x, Cur_dPos.coor_y);
+						Cur_rPos.coor_ori = target_angle;
+						
+						double delta_x = cur_tra_vel * 0.2 * cos(Cur_rPos.coor_ori);
+						double delta_y = cur_tra_vel * 0.2 * sin(Cur_rPos.coor_ori);
+						
+						Cur_rPos.coor_x = (INT16)(Cur_rPos.coor_x + delta_x + 0.5);
+						Cur_rPos.coor_y = (INT16)(Cur_rPos.coor_y + delta_y + 0.5);
+					}
 				}
 				
 				// 障碍物检测和避让
 				if (slam_ready && slam_system && obstacle_avoidance && openness_planner && astar_planner) {
-					// 1. 障碍物检测
 					obstacle_avoidance->detectObstacles(obstacle, Cur_rPos.coor_ori);
 					
-					// 2. SLAM地图更新
+					// SLAM地图更新
 					if (frame_count % 10 == 0) {
 						slam_system->updateMap(Cur_rPos, obstacle);
 						
 						if (frame_count % 30 == 0) {
-							// 修改：传入目标点进行目标导向的空旷度计算
 							Point target_point;
 							target_point.coor_x = Cur_dPos.coor_x;
 							target_point.coor_y = Cur_dPos.coor_y;
@@ -220,227 +263,104 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 						}
 					}
 					
-					// 3. 确定目标点
+					// 目标点
 					Point target_point;
-					bool using_candidate_target = false;
+					target_point.coor_x = Cur_dPos.coor_x;
+					target_point.coor_y = Cur_dPos.coor_y;
+					
+					// 计算距离和角度
+					double dist_to_target = MathUtils::calculateDistance(
+						Cur_rPos.coor_x, Cur_rPos.coor_y,
+						target_point.coor_x, target_point.coor_y);
+					
+					double target_angle = MathUtils::calculateBearing(
+						Cur_rPos.coor_x, Cur_rPos.coor_y,
+						target_point.coor_x, target_point.coor_y);
 
-					// ✅ 优先级1:使用已知目标点
-					if (Cur_dPos.coor_x != 0 || Cur_dPos.coor_y != 0) {
-						target_point.coor_x = Cur_dPos.coor_x;
-						target_point.coor_y = Cur_dPos.coor_y;
-					} 
-					// ✅ 优先级2:目标未知,尝试从候选中选择
-					else if (slam_system) {
-						Point candidate_pos;
-						double candidate_conf;
-						
-						if (slam_system->getBestCandidate(candidate_pos, candidate_conf)) {
-							target_point = candidate_pos;
-							using_candidate_target = true;
-							
-							static int log_counter = 0;
-							if (++log_counter % 30 == 0) {
-								cout << ">> Using CANDIDATE target at (" 
-								     << candidate_pos.coor_x << "," << candidate_pos.coor_y << ")"
-								     << " confidence=" << candidate_conf << endl;
-							}
-						} else {
-							// 没有候选,继续探索
-							target_point.coor_x = 0;
-							target_point.coor_y = 0;
-						}
-					}
+					// ✅ 关键：直接使用服务器端的 detect_object 标识
+					bool object_detected = (S2Cdata.detect_object > 0);
+					bool task_finished = (S2Cdata.task_finish > 0);
 
-					// 计算距离
-					double dist_to_target = sqrt(pow(target_point.coor_x - Cur_rPos.coor_x, 2) +
-					                             pow(target_point.coor_y - Cur_rPos.coor_y, 2));
+					double planned_vel = 0;
+					double planned_rot = 0;
 
-					// ✅ 物理确认检测
-					bool target_physically_detected = (S2Cdata.detect_object > 0);
-					if (target_physically_detected && slam_system) {
-						// 物理传感器检测到物体,确认为真实目标
-						slam_system->confirmTargetPhysically(Cur_rPos.coor_x, Cur_rPos.coor_y);
-						
-						static int confirm_log = 0;
-						if (++confirm_log % 10 == 0) {
-							cout << ">>> Physical sensor confirms target!" << endl;
-						}
-					}
+					frames_since_replan++;
 
-					// ✅ 到达判断
-					bool actually_reached = (dist_to_target < 10.0) && target_physically_detected;
-
-					if (actually_reached) {
-						cout << "====== TARGET REACHED! ======" << endl;
-						if (using_candidate_target) {
-							cout << "Reached CANDIDATE target (unknown location)" << endl;
-						} else {
-							cout << "Reached KNOWN target" << endl;
-						}
-						cout << "Final distance: " << dist_to_target << " cm" << endl;
+					// 决策1: 任务完成
+					if (task_finished) {
+						cout << "====== TASK FINISHED! ======" << endl;
+						cout << "Target contacted successfully!" << endl;
 						cur_tra_vel = 0;
 						cur_rot_vel = 0;
 						first_frame_done = false;
-						target_visible = false;
 					}
+					// 决策2: 目标已检测 (S2Cdata.detect_object > 0)
+					else if (object_detected) {
+						if (!using_astar || frames_since_replan > 25 || pose_changed) {
+							cout << ">> [A* MODE] Target detected by sensor (detect_object=" 
+							     << (int)S2Cdata.detect_object << "), dist=" << (int)dist_to_target << "cm" << endl;
+							
+							if (pose_changed) {
+								cout << "   [REPLAN] Robot pose changed, replanning..." << endl;
+							}
+							
+							if (astar_planner->planPath(Cur_rPos, target_point, astar_path, path_length)) {
+								using_astar = true;
+								frames_since_replan = 0;
+								
+								for (int i = 0; i < (std::min)(path_length, 100); i++) {
+									C2Sdata.Traj[i] = astar_path[i];
+								}
+								
+								cout << "   [SUCCESS] Path planned: " << path_length << " waypoints" << endl;
+							}
+							else {
+								using_astar = false;
+								cout << "   [FAILED] A* failed, using direct approach" << endl;
+							}
+						}
+						
+						if (using_astar && path_length > 0) {
+							astar_planner->followPath(Cur_rPos, astar_path, path_length, obstacle,
+							                      planned_vel, planned_rot);
+							
+							obstacle_avoidance->computeAvoidanceVelocity(planned_vel, planned_rot,
+							                            cur_tra_vel, cur_rot_vel, obstacle, Cur_rPos.coor_ori);
+						}
+						else {
+							double angle_error = MathUtils::angleDifference(target_angle, Cur_rPos.coor_ori);
+							
+							if (fabs(angle_error) > 0.6) {
+								planned_vel = 18.0;
+								planned_rot = (angle_error > 0) ? 0.5 : -0.5;
+							} else if (fabs(angle_error) > 0.3) {
+								planned_vel = 30.0;
+								planned_rot = angle_error * 1.2;
+							} else {
+								planned_vel = (dist_to_target > 100.0) ? 45.0 : 
+								              (dist_to_target > 50.0) ? 35.0 : 25.0;
+								planned_rot = angle_error * 0.8;
+							}
+							
+							obstacle_avoidance->computeAvoidanceVelocity(planned_vel, planned_rot,
+							                            cur_tra_vel, cur_rot_vel, obstacle, Cur_rPos.coor_ori);
+						}
+					}
+					// ✅ 决策3: 未检测到目标 - 使用探索模式
 					else {
-						// 声明变量
-						double planned_vel = 0;
-						double planned_rot = 0;
+						if (using_astar) {
+							cout << ">> [EXPLORE] Target lost (detect_object=0), switching to exploration" << endl;
+							using_astar = false;
+							path_length = 0;
+						}
 						
-						frames_since_replan++;
+						// ❌ 错误！这里传递的是 true，应该传递 object_detected (false)
+						openness_planner->computeMotionDirection(Cur_rPos, target_point, obstacle,
+						                                         planned_vel, planned_rot, object_detected);
 						
-						// 计算距离
-						double dist_to_target = sqrt(pow(target_point.coor_x - Cur_rPos.coor_x, 2) +
-													 pow(target_point.coor_y - Cur_rPos.coor_y, 2));
-
-    // ✅ 简化的决策逻辑：仅依赖 detect_object 和 task_finish
-    bool object_detected = (S2Cdata.detect_object > 0);
-    bool task_finished = (S2Cdata.task_finish > 0);
-    bool target_known = (target_point.coor_x != 0 || target_point.coor_y != 0);
-
-    // 检查任务完成状态
-    if (task_finished) {
-        cout << "====== TASK FINISHED! ======" << endl;
-        cout << "Target contacted successfully!" << endl;
-        cur_tra_vel = 0;
-        cur_rot_vel = 0;
-        first_frame_done = false;
-    }
-    else if (object_detected) {
-        // ✅ 激光传感器检测到目标：使用 A* 规划
-        
-        // 每25帧或首次检测到时重新规划路径
-        if (!using_astar || frames_since_replan > 25) {
-            cout << ">> [A* MODE] Laser sensor detected target" << endl;
-            cout << "   Distance: " << (int)dist_to_target << "cm" << endl;
-            
-            if (astar_planner->planPath(Cur_rPos, target_point, astar_path, path_length)) {
-                using_astar = true;
-                frames_since_replan = 0;
-                
-                // 将路径存入通信数据（用于可视化）
-                for (int i = 0; i < (std::min)(path_length, 100); i++) {
-                    C2Sdata.Traj[i] = astar_path[i];
-                }
-                
-                cout << "   [OK] A* planned: " << path_length << " waypoints" << endl;
-            }
-            else {
-                using_astar = false;
-                cout << "   [FAIL] A* failed, using direct approach" << endl;
-            }
-        }
-        
-        if (using_astar && path_length > 0) {
-            // ✅ 跟随 A* 路径，并应用避障
-            astar_planner->followPath(Cur_rPos, astar_path, path_length, obstacle,
-                                  planned_vel, planned_rot);
-            
-            // ✅ 使用避障调整（恢复原始行为）
-            obstacle_avoidance->computeAvoidanceVelocity(planned_vel, planned_rot,
-                                                     cur_tra_vel, cur_rot_vel, obstacle);
-        }
-        else {
-            // A* 失败或路径为空，直接朝向目标
-            double target_dx = target_point.coor_x - Cur_rPos.coor_x;
-            double target_dy = target_point.coor_y - Cur_rPos.coor_y;
-            double target_angle = atan2(target_dy, target_dx);
-            double angle_error = target_angle - Cur_rPos.coor_ori;
-            
-            while (angle_error > PI) angle_error -= 2 * PI;
-            while (angle_error < -PI) angle_error += 2 * PI;
-            
-            // 根据角度误差调整速度
-            if (fabs(angle_error) > 0.6) {
-                planned_vel = 18.0;
-                planned_rot = (angle_error > 0) ? 0.5 : -0.5;
-            } else if (fabs(angle_error) > 0.3) {
-                planned_vel = 30.0;
-                planned_rot = angle_error * 1.2;
-            } else {
-                // 根据距离调整速度
-                if (dist_to_target > 100.0) {
-                    planned_vel = 45.0;
-                } else if (dist_to_target > 50.0) {
-                    planned_vel = 35.0;
-                } else {
-                    planned_vel = 25.0;
-                }
-                planned_rot = angle_error * 0.8;
-            }
-            
-            // ✅ 使用避障调整
-            obstacle_avoidance->computeAvoidanceVelocity(planned_vel, planned_rot,
-                                                     cur_tra_vel, cur_rot_vel, obstacle);
-        }
-    }
-    else {
-        // ✅ 未检测到目标：使用探索模式
-        if (using_astar) {
-            cout << ">> [EXPLORE] Target lost, switching to exploration" << endl;
-            using_astar = false;
-            path_length = 0;
-        }
-        
-        // 目标位置已知时，传入目标点引导探索方向
-        openness_planner->computeMotionDirection(Cur_rPos, target_point, obstacle,
-                                                 planned_vel, planned_rot, target_known);
-        
-        // ✅ 使用避障调整
-        obstacle_avoidance->computeAvoidanceVelocity(planned_vel, planned_rot,
-                                                     cur_tra_vel, cur_rot_vel, obstacle);
-    }
-    
-    // 碰撞检测
-    if (current_collision) {
-        cur_tra_vel = 0;
-        cur_rot_vel = 0;
-    }
-}
-
-// 每30帧输出一次信息
-if (frame_count % 30 == 0 && frame_count > 0) {
-    ObstacleInfo front, left, right;
-    obstacle_avoidance->getObstacleInfo(front, left, right);
-    
-    // ✅ 简化的状态输出
-    bool object_detected = (S2Cdata.detect_object > 0);
-    bool task_finished = (S2Cdata.task_finish > 0);
-    
-    cout << "F:" << frame_count 
-         << " Pos:(" << Cur_rPos.coor_x << "," << Cur_rPos.coor_y << ")"
-         << " Dist:" << (int)dist_to_target;
-    
-    // 显示当前模式
-    if (task_finished) {
-        cout << " [FINISHED]";
-    } else if (using_astar) {
-        cout << " [A*]";
-    } else {
-        cout << " [EXPLORE]";
-    }
-    
-    // 显示传感器状态
-    cout << " Sensor:" << (object_detected ? "DETECT" : "NONE");
-    
-    // 显示其他状态
-    if (obstacle_avoidance->isInRecoveryMode()) {
-        cout << " [RECOVERY]";
-    }
-    if (current_collision) {
-        cout << " [COLLISION!]";
-    }
-    
-    // 显示障碍物信息
-    cout << " Obs:[F:" << (int)front.distance 
-         << " L:" << (int)left.distance 
-         << " R:" << (int)right.distance << "]"
-         << " V:" << (int)cur_tra_vel 
-         << " W:" << std::fixed << std::setprecision(2) << cur_rot_vel 
-         << endl;
-}
-
+						obstacle_avoidance->computeAvoidanceVelocity(planned_vel, planned_rot,
+						                                cur_tra_vel, cur_rot_vel, obstacle, Cur_rPos.coor_ori);
+					}
 				}
 				else {
 					cur_tra_vel = 30;
@@ -449,7 +369,6 @@ if (frame_count % 30 == 0 && frame_count > 0) {
 				
 				frame_count++;
 				
-				// 直接继续发送数据
 				C2Sdata.cur_rpose = Cur_rPos;
 				C2Sdata.tra_vel = cur_tra_vel;
 				C2Sdata.rot_vel = cur_rot_vel;
