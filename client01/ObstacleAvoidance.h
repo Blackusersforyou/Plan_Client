@@ -202,7 +202,7 @@ public:
 			emergency_stop_counter = 0;
 		}
 		
-		// 脱困模式
+		// ✅ 改进1: 脱困模式 - 原地旋转并实时搜寻可行路径
 		if (in_recovery_mode) {
 			recovery_rotation_frames++;
 			

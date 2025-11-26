@@ -207,8 +207,6 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 					
 					cur_tra_vel = 0;
 					cur_rot_vel = 0;
-					
-					cout << "All systems reset for new scene" << endl;
 				}
 				
 				C2Sdata.Timestamp = S2Cdata.Timestamp;

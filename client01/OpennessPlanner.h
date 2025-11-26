@@ -8,6 +8,7 @@
 #include <cmath>
 #include <algorithm>
 #include <iostream>
+#include "MathUtils.h"
 
 class OpennessPlanner {
 private:
