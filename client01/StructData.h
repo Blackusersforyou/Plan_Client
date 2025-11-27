@@ -75,7 +75,6 @@ typedef struct{
 	double target_angle;
 }S2CINFO;
 
-// ✅ 恢复原有的 C2SINFO 结构,不添加新字段
 typedef struct{
 	INT16 Timestamp;
 	INT16 Runstatus;

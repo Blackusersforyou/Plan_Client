@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <map>
 #include <iostream>
+#include "MathUtils.h"
 
 class AStarPlanner {
 private:
@@ -313,86 +314,98 @@ public:
 
 	void followPath(POSE cur_pose, Point* path, int path_length, INT16* laser_data,
                 double& tra_vel, double& rot_vel) {
-		if (path_length < 1) {
-			tra_vel = 0;
-			rot_vel = 0;
-			return;
-		}
-
-		// 找到最近的路径点
-		int nearest_idx = 0;
-		double min_dist = 1e10;
-		
-		for (int i = 0; i < path_length; i++) {
-			double dist = MathUtils::calculateDistance(
-				cur_pose.coor_x, cur_pose.coor_y,
-				path[i].coor_x, path[i].coor_y);
-			if (dist < min_dist) {
-				min_dist = dist;
-				nearest_idx = i;
-			}
-		}
-
-		// ✅ 修复1: 动态前瞻距离
-		int lookahead;
-		if (min_dist < 30.0) {
-			lookahead = 1;  // 很近时看下一个点
-		} else if (min_dist < 60.0) {
-			lookahead = 2;
-		} else {
-			lookahead = 3;  // 较远时前瞻更远
-		}
-		
-		int target_idx = (std::min)(nearest_idx + lookahead, path_length - 1);
-		Point target_point = path[target_idx];
-
-		double distance = MathUtils::calculateDistance(
-			cur_pose.coor_x, cur_pose.coor_y,
-			target_point.coor_x, target_point.coor_y);
-		
-		if (distance < 5.0) {
-			tra_vel = 0;
-			rot_vel = 0;
-			return;
-		}
-
-		// ✅ 使用MathUtils计算方向角
-		double target_angle = MathUtils::calculateBearing(
-			cur_pose.coor_x, cur_pose.coor_y,
-			target_point.coor_x, target_point.coor_y);
-		
-		double angle_error = MathUtils::angleDifference(target_angle, cur_pose.coor_ori);
-
-		// ✅ 调试输出
-		static int debug_counter = 0;
-		if (++debug_counter % 30 == 0) {
-			std::cout << "   [PATH_FOLLOW] nearest_idx=" << nearest_idx << "/" << path_length
-			          << " target_idx=" << target_idx
-			          << " cur=(" << cur_pose.coor_x << "," << cur_pose.coor_y << ")"
-			          << " target=(" << target_point.coor_x << "," << target_point.coor_y << ")"
-			          << " dist=" << (int)distance
-			          << " cur_ori=" << (int)(cur_pose.coor_ori * 180 / PI) << "deg"
-			          << " target_angle=" << (int)(target_angle * 180 / PI) << "deg"
-			          << " error=" << (int)(angle_error * 180 / PI) << "deg" << std::endl;
-		}
-
-		// 速度控制
-		if (fabs(angle_error) > 0.7) {
-			tra_vel = 10.0;
-			rot_vel = (angle_error > 0) ? 0.5 : -0.5;
-		}
-		else if (fabs(angle_error) > 0.4) {
-			tra_vel = 20.0;
-			rot_vel = angle_error * 1.5;
-		}
-		else {
-			tra_vel = 30.0;
-			rot_vel = angle_error * 1.0;
-		}
-
-		tra_vel = (std::max)(0.0, (std::min)(40.0, tra_vel));
-		rot_vel = (std::max)(-0.6, (std::min)(0.6, rot_vel));
+	if (path_length < 1) {
+		tra_vel = 0;
+		rot_vel = 0;
+		return;
 	}
+
+	// 找到最近的路径点
+	int nearest_idx = 0;
+	double min_dist = 1e10;
+	
+	for (int i = 0; i < path_length; i++) {
+		double dist = MathUtils::calculateDistance(
+			cur_pose.coor_x, cur_pose.coor_y,
+			path[i].coor_x, path[i].coor_y);
+		if (dist < min_dist) {
+			min_dist = dist;
+			nearest_idx = i;
+		}
+	}
+
+	// ✅ 修复1: 动态前瞻距离
+	int lookahead;
+	if (min_dist < 30.0) {
+		lookahead = 1;  // 很近时看下一个点
+	} else if (min_dist < 60.0) {
+		lookahead = 2;
+	} else {
+		lookahead = 3;  // 较远时前瞻更远
+	}
+	
+	int target_idx = (std::min)(nearest_idx + lookahead, path_length - 1);
+	Point target_point = path[target_idx];
+
+	double distance = MathUtils::calculateDistance(
+		cur_pose.coor_x, cur_pose.coor_y,
+		target_point.coor_x, target_point.coor_y);
+	
+	// ✅ 修复2: 非常接近目标时才真正停止（改为3cm）
+	if (distance < 3.0 && target_idx == path_length - 1) {
+		tra_vel = 0;
+		rot_vel = 0;
+		std::cout << "   [PATH_COMPLETE] Reached final target!" << std::endl;
+		return;
+	}
+
+	// ✅ 使用MathUtils计算方向角
+	double target_angle = MathUtils::calculateBearing(
+		cur_pose.coor_x, cur_pose.coor_y,
+		target_point.coor_x, target_point.coor_y);
+	
+	double angle_error = MathUtils::angleDifference(target_angle, cur_pose.coor_ori);
+
+	// ✅ 调试输出
+	static int debug_counter = 0;
+	if (++debug_counter % 30 == 0) {
+		std::cout << "   [PATH_FOLLOW] nearest_idx=" << nearest_idx << "/" << path_length
+		          << " target_idx=" << target_idx
+		          << " cur=(" << cur_pose.coor_x << "," << cur_pose.coor_y << ")"
+		          << " target=(" << target_point.coor_x << "," << target_point.coor_y << ")"
+		          << " dist=" << (int)distance
+		          << " cur_ori=" << (int)(cur_pose.coor_ori * 180 / PI) << "deg"
+		          << " target_angle=" << (int)(target_angle * 180 / PI) << "deg"
+		          << " error=" << (int)(angle_error * 180 / PI) << "deg" << std::endl;
+	}
+
+	// ✅ 修复3: 改进速度控制 - 即使角度误差大也保持最小前进速度
+	if (fabs(angle_error) > 1.2) {
+		// 角度误差非常大（>69度）：原地转向
+		tra_vel = 5.0;  // 保持微小前进速度
+		rot_vel = (angle_error > 0) ? 0.6 : -0.6;
+	}
+	else if (fabs(angle_error) > 0.7) {
+		// 角度误差大（>40度）：慢速前进+快速转向
+		tra_vel = 15.0;
+		rot_vel = (angle_error > 0) ? 0.5 : -0.5;
+	}
+	else if (fabs(angle_error) > 0.4) {
+		// 角度误差中等（>23度）
+		tra_vel = 25.0;
+		rot_vel = angle_error * 1.5;
+	}
+	else {
+		// 角度误差小：正常前进
+		tra_vel = (distance > 50.0) ? 35.0 : 
+		          (distance > 20.0) ? 25.0 : 15.0;
+		rot_vel = angle_error * 1.0;
+	}
+
+	// 限制速度范围
+	tra_vel = (std::max)(5.0, (std::min)(40.0, tra_vel));  // 最小5cm/s
+	rot_vel = (std::max)(-0.6, (std::min)(0.6, rot_vel));
+}
 };
 
 #endif

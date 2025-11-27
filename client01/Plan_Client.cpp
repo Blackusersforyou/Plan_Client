@@ -94,8 +94,6 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 	memset(&Last_Initial_rPos, 0, sizeof(POSE));
 	bool pose_initialized = false;
 	
-	bool robot_angle_known = false;
-	
 	while (Runstatus > 0){
 		try {
 			memset(recvBuf, 0, sizeof(recvBuf));
@@ -112,7 +110,7 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 					break;
 				}
 				
-				// 检测机器人初始位姿是否发生变化
+				// ✅ 检测机器人初始位姿是否发生变化
 				bool pose_changed = false;
 				if (pose_initialized && first_frame_done) {
 					POSE current_initial_pose = S2Cdata.initial_rpose;
@@ -128,8 +126,17 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 						     << current_initial_pose.coor_y << ", " 
 						     << current_initial_pose.coor_ori << ")" << endl;
 						
+						// 触发重新初始化
 						first_frame_done = false;
 						S2Cdata.Timestamp = 0;
+						
+						// 立即更新为新的初始位姿
+						memcpy(&Cur_rPos, &current_initial_pose, sizeof(POSE));
+						memcpy(&Initial_rPos, &current_initial_pose, sizeof(POSE));
+						memcpy(&Last_Initial_rPos, &current_initial_pose, sizeof(POSE));
+						
+						cout << "   Position reset to: (" << Cur_rPos.coor_x << ", " 
+						     << Cur_rPos.coor_y << ", " << Cur_rPos.coor_ori << ")" << endl;
 					}
 				}
 				
@@ -149,51 +156,37 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 				}
 				last_collision_state = current_collision;
 				
-				// ✅ 第一帧初始化
+				// ✅ 第一帧初始化 - 仅使用 initial_rpose
 				if(S2Cdata.Timestamp == 0 && !first_frame_done){
 					cout << "====== NEW SCENE ======" << endl;
 					cout << "First frame received" << endl;
 					
+					// ⚠️ 关键：所有初始位姿数据来自 S2Cdata.initial_rpose
 					memcpy(&Initial_rPos, &S2Cdata.initial_rpose, sizeof(POSE));
 					memcpy(&Cur_rPos, &S2Cdata.initial_rpose, sizeof(POSE));
 					memcpy(&Last_Initial_rPos, &S2Cdata.initial_rpose, sizeof(POSE));
 					pose_initialized = true;
-					
-					// 判断机器人实时角度是否已知
-					if (fabs(S2Cdata.target_angle) > PI) {
-						robot_angle_known = false;
-						cout << "Robot angle: UNKNOWN (will estimate from motion)" << endl;
-					} else {
-						robot_angle_known = true;
-						Cur_rPos.coor_ori = S2Cdata.target_angle;
-						cout << "Robot angle: KNOWN (" << S2Cdata.target_angle << " rad)" << endl;
-					}
 					
 					// 目标点坐标
 					Cur_dPos.coor_x = S2Cdata.initial_dpose.coor_x;
 					Cur_dPos.coor_y = S2Cdata.initial_dpose.coor_y;
 					Cur_dPos.coor_ori = 0;
 					
-					cout << "Robot pos: (" << Initial_rPos.coor_x << ", " 
-					     << Initial_rPos.coor_y << "), ori: " 
-					     << Initial_rPos.coor_ori << endl;
+					cout << "Robot pos: (" << Cur_rPos.coor_x << ", " 
+					     << Cur_rPos.coor_y << "), ori: " 
+					     << (Cur_rPos.coor_ori * 180 / PI) << " deg" << endl;
 					cout << "Target pos: (" << Cur_dPos.coor_x << ", " 
 					     << Cur_dPos.coor_y << ")" << endl;
 					
 					double dist_to_target = MathUtils::calculateDistance(
-						Initial_rPos.coor_x, Initial_rPos.coor_y,
+						Cur_rPos.coor_x, Cur_rPos.coor_y,
 						Cur_dPos.coor_x, Cur_dPos.coor_y);
 					cout << "Distance to target: " << (int)dist_to_target << " cm" << endl;
 					
-					// ✅ 坐标验证 - 仅在第一帧执行一次
-					cout << "=== Coordinate System Verification ===" << endl;
-					MathUtils::debugCoordinateConversion(Initial_rPos.coor_x, Initial_rPos.coor_y, "Robot Start");
-					MathUtils::debugCoordinateConversion(Cur_dPos.coor_x, Cur_dPos.coor_y, "Target");
-					
-					// 验证中间点
-					MathUtils::debugCoordinateConversion(300.0, 400.0, "Test Point 1");
-					MathUtils::debugCoordinateConversion(700.0, 600.0, "Test Point 2");
-					cout << "=======================================" << endl;
+					// 验证初始位置非零
+					if (Cur_rPos.coor_x == 0 && Cur_rPos.coor_y == 0) {
+						cout << "⚠️ WARNING: Robot initialized at origin (0,0)!" << endl;
+					}
 					
 					using_astar = false;
 					path_length = 0;
@@ -213,35 +206,77 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 				C2Sdata.Runstatus = S2Cdata.Runstatus;
 				memcpy(obstacle, S2Cdata.obstacle, 360 * sizeof(INT16));
 				
-				// 位姿更新
+				// ✅ 位姿更新 - 修复避障时的位姿跟踪
 				if (frame_count > 0 && first_frame_done) {
-					if (robot_angle_known) {
-						double delta_ori = cur_rot_vel * 0.2;
-						Cur_rPos.coor_ori = MathUtils::normalizeAngle(Cur_rPos.coor_ori + delta_ori);
-						
-						double delta_x = cur_tra_vel * 0.2 * cos(Cur_rPos.coor_ori);
-						double delta_y = cur_tra_vel * 0.2 * sin(Cur_rPos.coor_ori);
+					// ⚠️ 关键修复1：正确的时间步长
+					const double dt = 0.03;  // Sleep(30ms) = 0.03s
+					const double vel_P = 4.5;
+					const double angle_P = 4.5;
+					
+					// ⚠️ 关键修复2：先更新角度（角速度始终有效）
+					double delta_ori = cur_rot_vel * dt * angle_P;
+					Cur_rPos.coor_ori = MathUtils::normalizeAngle(Cur_rPos.coor_ori + delta_ori);
+					
+					// ⚠️ 关键修复3：只有当线速度>0时才更新位置
+					if (fabs(cur_tra_vel) > 0) {  // 避免微小速度的累积误差
+						double delta_x = cur_tra_vel * dt * cos(Cur_rPos.coor_ori) * vel_P;
+						double delta_y = cur_tra_vel * dt * sin(Cur_rPos.coor_ori) * vel_P;
 						
 						Cur_rPos.coor_x = (INT16)(Cur_rPos.coor_x + delta_x + 0.5);
 						Cur_rPos.coor_y = (INT16)(Cur_rPos.coor_y + delta_y + 0.5);
+					}
+					
+					// 在位姿更新后添加验证
+					if (frame_count > 0 && first_frame_done) {
+						const double dt = 0.03;
+						
+						// 记录更新前的位姿
+						INT16 old_x = Cur_rPos.coor_x;
+						INT16 old_y = Cur_rPos.coor_y;
+						double old_ori = Cur_rPos.coor_ori;
+						
+						// 更新角度
+						double delta_ori = cur_rot_vel * dt * angle_P;
+						Cur_rPos.coor_ori = MathUtils::normalizeAngle(Cur_rPos.coor_ori + delta_ori);
+						
+						// 更新位置
+						if (fabs(cur_tra_vel) > 0) {
+							double delta_x = cur_tra_vel * dt * cos(Cur_rPos.coor_ori) * vel_P;
+							double delta_y = cur_tra_vel * dt * sin(Cur_rPos.coor_ori) * vel_P;
+							
+							Cur_rPos.coor_x = (INT16)(Cur_rPos.coor_x + delta_x + 0.5);
+							Cur_rPos.coor_y = (INT16)(Cur_rPos.coor_y + delta_y + 0.5);
+						}
+						
+						// ✅ 添加位姿变化检测
+						static int no_change_counter = 0;
+						bool pose_changed = (Cur_rPos.coor_x != old_x || 
+						                     Cur_rPos.coor_y != old_y || 
+						                     fabs(Cur_rPos.coor_ori - old_ori) > 0.01);
+						
+						if (!pose_changed && (fabs(cur_tra_vel) > 1.0 || fabs(cur_rot_vel) > 0.05)) {
+							no_change_counter++;
+							if (no_change_counter % 20 == 1) {
+								cout << "⚠️ WARNING: Pose not updating! v=" << cur_tra_vel 
+								     << " w=" << cur_rot_vel << " counter=" << no_change_counter << endl;
+							}
+						} else {
+							no_change_counter = 0;
+						}
 						
 						static int pose_log_counter = 0;
 						if (++pose_log_counter % 50 == 0) {
-							cout << "[POSE] x=" << Cur_rPos.coor_x << " y=" << Cur_rPos.coor_y 
-							     << " ori=" << (Cur_rPos.coor_ori * 180 / PI) << "deg"
-							     << " v=" << cur_tra_vel << " w=" << cur_rot_vel << endl;
+							cout << "[POSE] x=" << Cur_rPos.coor_x 
+							     << " y=" << Cur_rPos.coor_y 
+							     << " ori=" << (int)(Cur_rPos.coor_ori * 180 / PI) << "deg"
+							     << " v=" << (int)cur_tra_vel 
+							     << " w=" << fixed << setprecision(2) << cur_rot_vel;
+						
+							if (no_change_counter > 0) {
+								cout << " ⚠️stuck=" << no_change_counter;
+							}
+							cout << endl;
 						}
-					} else {
-						double target_angle = MathUtils::calculateBearing(
-							Cur_rPos.coor_x, Cur_rPos.coor_y,
-							Cur_dPos.coor_x, Cur_dPos.coor_y);
-						Cur_rPos.coor_ori = target_angle;
-						
-						double delta_x = cur_tra_vel * 0.2 * cos(Cur_rPos.coor_ori);
-						double delta_y = cur_tra_vel * 0.2 * sin(Cur_rPos.coor_ori);
-						
-						Cur_rPos.coor_x = (INT16)(Cur_rPos.coor_x + delta_x + 0.5);
-						Cur_rPos.coor_y = (INT16)(Cur_rPos.coor_y + delta_y + 0.5);
 					}
 				}
 				
@@ -275,7 +310,6 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 						Cur_rPos.coor_x, Cur_rPos.coor_y,
 						target_point.coor_x, target_point.coor_y);
 
-					// ✅ 关键：直接使用服务器端的 detect_object 标识
 					bool object_detected = (S2Cdata.detect_object > 0);
 					bool task_finished = (S2Cdata.task_finish > 0);
 
@@ -295,8 +329,7 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 					// 决策2: 目标已检测 (S2Cdata.detect_object > 0)
 					else if (object_detected) {
 						if (!using_astar || frames_since_replan > 25 || pose_changed) {
-							cout << ">> [A* MODE] Target detected by sensor (detect_object=" 
-							     << (int)S2Cdata.detect_object << "), dist=" << (int)dist_to_target << "cm" << endl;
+							cout << ">> [A* MODE] Target detected, dist=" << (int)dist_to_target << "cm" << endl;
 							
 							if (pose_changed) {
 								cout << "   [REPLAN] Robot pose changed, replanning..." << endl;
@@ -344,15 +377,14 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 							                            cur_tra_vel, cur_rot_vel, obstacle, Cur_rPos.coor_ori);
 						}
 					}
-					// ✅ 决策3: 未检测到目标 - 使用探索模式
+					// 决策3: 未检测到目标 - 使用探索模式
 					else {
 						if (using_astar) {
-							cout << ">> [EXPLORE] Target lost (detect_object=0), switching to exploration" << endl;
+							cout << ">> [EXPLORE] Target lost, switching to exploration" << endl;
 							using_astar = false;
 							path_length = 0;
 						}
 						
-						// ❌ 错误！这里传递的是 true，应该传递 object_detected (false)
 						openness_planner->computeMotionDirection(Cur_rPos, target_point, obstacle,
 						                                         planned_vel, planned_rot, object_detected);
 						
@@ -361,8 +393,9 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 					}
 				}
 				else {
-					cur_tra_vel = 30;
-					cur_rot_vel = -0.15;
+					// ⚠️ 系统未就绪时停止运动，避免持续前进
+					cur_tra_vel = 0;
+					cur_rot_vel = 0;
 				}
 				
 				frame_count++;

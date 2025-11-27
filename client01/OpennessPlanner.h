@@ -146,7 +146,7 @@ public:
 			sample_range = PI;
 		} else {
 			num_samples = 60;
-			sample_range = 2.5 * PI;
+			sample_range = 2 * PI;
 		}
 		
 		double best_direction_score = 0;

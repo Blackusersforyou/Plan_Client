@@ -202,12 +202,13 @@ public:
 			emergency_stop_counter = 0;
 		}
 		
-		// ✅ 改进1: 脱困模式 - 原地旋转并实时搜寻可行路径
+		// ✅ 改进脱困模式 - 保持微小前进速度以更新位姿
 		if (in_recovery_mode) {
 			recovery_rotation_frames++;
 			
-			// 停止前进,仅旋转
-			adjusted_vel = 0;
+			// ✅ 修复：保持微小前进速度（5cm/s）以便位姿更新
+			// 这样即使在旋转，位置也会有微小变化，避免完全静止
+			adjusted_vel = 5.0;  // 从0改为5
 			
 			// 实时搜寻最佳可行方向
 			double best_direction = findBestEscapeDirection(laser_data, current_angle);
@@ -233,20 +234,22 @@ public:
 				}
 				if (count > 0) clearance /= count;
 				
-				// ✅ 修复3: 降低空旷度要求和角度要求
-				if (clearance > 80.0 && fabs(angle_to_best) < 0.4) {  // 从100/0.3改为80/0.4
+				// ✅ 降低空旷度要求
+				if (clearance > 70.0 && fabs(angle_to_best) < 0.5) {  // 从80/0.4改为70/0.5
 					path_found = true;
 					std::cout << ">> Recovery: Found clear path! Clearance=" 
-					          << (int)clearance << "cm" << std::endl;
+					          << (int)clearance << "cm, angle_error=" 
+					          << (int)(angle_to_best * 180 / PI) << "deg" << std::endl;
 				}
 			}
 			
-			// ✅ 修复3: 缩短超时时间
-			if (path_found || recovery_rotation_frames > 40) {  // 从60改为40
+			// ✅ 缩短超时时间，防止长时间卡住
+			if (path_found || recovery_rotation_frames > 30) {  // 从40改为30
 				if (path_found) {
 					std::cout << ">> Recovery complete! Clear path found." << std::endl;
 				} else {
-					std::cout << ">> Recovery timeout, resuming navigation." << std::endl;
+					std::cout << ">> Recovery timeout (" << recovery_rotation_frames 
+					          << " frames), forcing resume." << std::endl;
 				}
 				in_recovery_mode = false;
 				recovery_rotation_frames = 0;
@@ -254,13 +257,14 @@ public:
 				return;
 			}
 			
-			// ✅ 修复3: 加快旋转速度
-			adjusted_rot = (angle_to_best > 0) ? 0.6 : -0.6;  // 从0.5改为0.6
+			// 旋转速度
+			adjusted_rot = (angle_to_best > 0) ? 0.6 : -0.6;
 			
-			if (recovery_rotation_frames % 5 == 1) {  // 从10改为5，更频繁输出
+			if (recovery_rotation_frames % 5 == 1) {
 				std::cout << ">> Recovery: Rotating [" 
-				          << recovery_rotation_frames << "/40] angle_diff=" 
-				          << (int)(angle_to_best * 180 / PI) << "deg" << std::endl;
+				          << recovery_rotation_frames << "/30] angle_diff=" 
+				          << (int)(angle_to_best * 180 / PI) << "deg, v=" 
+				          << (int)adjusted_vel << "cm/s" << std::endl;
 			}
 			
 			return;
@@ -334,6 +338,15 @@ public:
 			avoidance_angle = (std::max)(-max_avoidance_angle, 
 			                           (std::min)(max_avoidance_angle, avoidance_angle));
 			adjusted_rot += avoidance_angle;
+			
+			// ✅ 确保避障时保持最小前进速度
+			if (adjusted_vel < 5.0 && adjusted_vel > -5.0) {
+				if (adjusted_vel >= 0) {
+					adjusted_vel = 5.0;
+				} else {
+					adjusted_vel = -5.0;
+				}
+			}
 		}
 		
 		// 限制速度和转向
