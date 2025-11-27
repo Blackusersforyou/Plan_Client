@@ -6,12 +6,13 @@
 #include "list"
 #include "vector"
 #include "winsock2.h"
-#include "StructData.h"
+#include "StructData.h"`
 #include "LaserSLAM.h"
 #include "ObstacleAvoidance.h"
 #include "OpennessPlanner.h"
 #include "AStarPlanner.h"
 #include "MathUtils.h"
+#include "PoseTracker.h"  // ✅ 添加位姿跟踪器头文件
 
 #pragma comment(lib,"ws2_32.lib")
 using namespace std;
@@ -32,6 +33,7 @@ LaserSLAM* slam_system = nullptr;
 ObstacleAvoidance* obstacle_avoidance = nullptr;
 OpennessPlanner* openness_planner = nullptr;
 AStarPlanner* astar_planner = nullptr;
+PoseTracker* pose_tracker = nullptr;  // ✅ 位姿跟踪器
 bool slam_ready = false;
 
 void Initialition(){
@@ -56,6 +58,9 @@ void Initialition(){
 		cout << "Creating A* Planner..." << endl;
 		astar_planner = new AStarPlanner(slam_system, obstacle_avoidance);
 		
+		cout << "Creating Pose Tracker..." << endl;
+		pose_tracker = new PoseTracker();
+		
 		slam_ready = true;
 		cout << "All systems initialized" << endl;
 	}
@@ -77,6 +82,9 @@ CString GetExePath()
 	return strExePath;
 }
 
+// ... [接收线程和主函数保持不变] ...
+
+// 在 Recv_Thre 函数中修改位姿更新部分
 DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 {
 	cout << "Receive thread started" << endl;
@@ -93,6 +101,10 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 	POSE Last_Initial_rPos;
 	memset(&Last_Initial_rPos, 0, sizeof(POSE));
 	bool pose_initialized = false;
+	
+	// ✅ 障碍物状态跟踪
+	double nearest_obstacle_dist = 9999.0;
+	bool is_avoiding_obstacle = false;
 	
 	while (Runstatus > 0){
 		try {
@@ -130,10 +142,15 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 						first_frame_done = false;
 						S2Cdata.Timestamp = 0;
 						
-						// 立即更新为新的初始位姿
+						// 立即更新位姿
 						memcpy(&Cur_rPos, &current_initial_pose, sizeof(POSE));
 						memcpy(&Initial_rPos, &current_initial_pose, sizeof(POSE));
 						memcpy(&Last_Initial_rPos, &current_initial_pose, sizeof(POSE));
+						
+						// ✅ 重置位姿跟踪器
+						if (pose_tracker) {
+							pose_tracker->reset(current_initial_pose);
+						}
 						
 						cout << "   Position reset to: (" << Cur_rPos.coor_x << ", " 
 						     << Cur_rPos.coor_y << ", " << Cur_rPos.coor_ori << ")" << endl;
@@ -156,18 +173,21 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 				}
 				last_collision_state = current_collision;
 				
-				// ✅ 第一帧初始化 - 仅使用 initial_rpose
+				// ✅ 第一帧初始化
 				if(S2Cdata.Timestamp == 0 && !first_frame_done){
 					cout << "====== NEW SCENE ======" << endl;
 					cout << "First frame received" << endl;
 					
-					// ⚠️ 关键：所有初始位姿数据来自 S2Cdata.initial_rpose
 					memcpy(&Initial_rPos, &S2Cdata.initial_rpose, sizeof(POSE));
 					memcpy(&Cur_rPos, &S2Cdata.initial_rpose, sizeof(POSE));
 					memcpy(&Last_Initial_rPos, &S2Cdata.initial_rpose, sizeof(POSE));
 					pose_initialized = true;
 					
-					// 目标点坐标
+					// ✅ 初始化位姿跟踪器
+					if (pose_tracker) {
+						pose_tracker->initialize(Cur_rPos);
+					}
+					
 					Cur_dPos.coor_x = S2Cdata.initial_dpose.coor_x;
 					Cur_dPos.coor_y = S2Cdata.initial_dpose.coor_y;
 					Cur_dPos.coor_ori = 0;
@@ -182,11 +202,6 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 						Cur_rPos.coor_x, Cur_rPos.coor_y,
 						Cur_dPos.coor_x, Cur_dPos.coor_y);
 					cout << "Distance to target: " << (int)dist_to_target << " cm" << endl;
-					
-					// 验证初始位置非零
-					if (Cur_rPos.coor_x == 0 && Cur_rPos.coor_y == 0) {
-						cout << "⚠️ WARNING: Robot initialized at origin (0,0)!" << endl;
-					}
 					
 					using_astar = false;
 					path_length = 0;
@@ -206,76 +221,74 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 				C2Sdata.Runstatus = S2Cdata.Runstatus;
 				memcpy(obstacle, S2Cdata.obstacle, 360 * sizeof(INT16));
 				
-				// ✅ 位姿更新 - 修复避障时的位姿跟踪
-				if (frame_count > 0 && first_frame_done) {
-					// ⚠️ 关键修复1：正确的时间步长
-					const double dt = 0.03;  // Sleep(30ms) = 0.03s
-					const double vel_P = 4.5;
-					const double angle_P = 4.5;
+				// ✅ 计算障碍物状态
+				nearest_obstacle_dist = 9999.0;
+				for (int i = 0; i < 360; i++) {
+					if (obstacle[i] > 0 && obstacle[i] < 5000) {
+						if (obstacle[i] < nearest_obstacle_dist) {
+							nearest_obstacle_dist = obstacle[i];
+						}
+					}
+				}
+				is_avoiding_obstacle = (nearest_obstacle_dist < 100.0);
+				
+				// ✅✅✅ 核心：使用 EKF 位姿跟踪器更新位姿 ✅✅✅
+				if (frame_count > 0 && first_frame_done && pose_tracker) {
+					POSE prev_pose = Cur_rPos;
 					
-					// ⚠️ 关键修复2：先更新角度（角速度始终有效）
-					double delta_ori = cur_rot_vel * dt * angle_P;
-					Cur_rPos.coor_ori = MathUtils::normalizeAngle(Cur_rPos.coor_ori + delta_ori);
+					// ✅ 激光数据校正（提高SLAM精度）
+					PoseTracker::LaserCorrectionResult laser_correction = 
+						pose_tracker->correctLaserData(obstacle);
 					
-					// ⚠️ 关键修复3：只有当线速度>0时才更新位置
-					if (fabs(cur_tra_vel) > 0) {  // 避免微小速度的累积误差
-						double delta_x = cur_tra_vel * dt * cos(Cur_rPos.coor_ori) * vel_P;
-						double delta_y = cur_tra_vel * dt * sin(Cur_rPos.coor_ori) * vel_P;
-						
-						Cur_rPos.coor_x = (INT16)(Cur_rPos.coor_x + delta_x + 0.5);
-						Cur_rPos.coor_y = (INT16)(Cur_rPos.coor_y + delta_y + 0.5);
+					if (laser_correction.correction_applied && frame_count % 100 == 0) {
+						cout << "[Laser Correction] " << laser_correction.corrected_count 
+						     << " points, avg=" << std::setprecision(2) << laser_correction.avg_correction 
+						     << " cm, max=" << laser_correction.max_correction << " cm" << endl;
 					}
 					
-					// 在位姿更新后添加验证
-					if (frame_count > 0 && first_frame_done) {
-						const double dt = 0.03;
-						
-						// 记录更新前的位姿
-						INT16 old_x = Cur_rPos.coor_x;
-						INT16 old_y = Cur_rPos.coor_y;
-						double old_ori = Cur_rPos.coor_ori;
-						
-						// 更新角度
-						double delta_ori = cur_rot_vel * dt * angle_P;
-						Cur_rPos.coor_ori = MathUtils::normalizeAngle(Cur_rPos.coor_ori + delta_ori);
-						
-						// 更新位置
-						if (fabs(cur_tra_vel) > 0) {
-							double delta_x = cur_tra_vel * dt * cos(Cur_rPos.coor_ori) * vel_P;
-							double delta_y = cur_tra_vel * dt * sin(Cur_rPos.coor_ori) * vel_P;
-							
-							Cur_rPos.coor_x = (INT16)(Cur_rPos.coor_x + delta_x + 0.5);
-							Cur_rPos.coor_y = (INT16)(Cur_rPos.coor_y + delta_y + 0.5);
+					// 更新位姿
+					PoseTracker::UpdateResult result = pose_tracker->update(
+						cur_tra_vel, cur_rot_vel,
+						is_avoiding_obstacle, nearest_obstacle_dist);
+					
+					Cur_rPos = result.integer_pose;
+					
+					// 检测异常
+					double pose_change = MathUtils::calculateDistance(
+						prev_pose.coor_x, prev_pose.coor_y,
+						Cur_rPos.coor_x, Cur_rPos.coor_y);
+					double angle_change = fabs(MathUtils::angleDifference(
+						Cur_rPos.coor_ori, prev_pose.coor_ori));
+					
+					if (pose_change > 15.0) {
+						static int large_jump_counter = 0;
+						if (++large_jump_counter % 5 == 1) {
+							cout << "[WARN] Large pose jump: " << (int)pose_change 
+							     << " cm | v=" << cur_tra_vel << " w=" << cur_rot_vel << endl;
 						}
+					}
+					
+					// 每50帧打印状态
+					static int pose_log_counter = 0;
+					if (++pose_log_counter % 50 == 0) {
+						pose_tracker->printStatus(result, result.coefficients, nearest_obstacle_dist);
 						
-						// ✅ 添加位姿变化检测
-						static int no_change_counter = 0;
-						bool pose_changed = (Cur_rPos.coor_x != old_x || 
-						                     Cur_rPos.coor_y != old_y || 
-						                     fabs(Cur_rPos.coor_ori - old_ori) > 0.01);
+						cout << "      Motion: move=" << std::fixed << std::setprecision(2) 
+						     << pose_change << " cm rot=" << (int)(angle_change * 180 / PI) 
+						     << " deg | v=" << cur_tra_vel << " w=" << cur_rot_vel << endl;
 						
-						if (!pose_changed && (fabs(cur_tra_vel) > 1.0 || fabs(cur_rot_vel) > 0.05)) {
-							no_change_counter++;
-							if (no_change_counter % 20 == 1) {
-								cout << "⚠️ WARNING: Pose not updating! v=" << cur_tra_vel 
-								     << " w=" << cur_rot_vel << " counter=" << no_change_counter << endl;
-							}
-						} else {
-							no_change_counter = 0;
-						}
-						
-						static int pose_log_counter = 0;
-						if (++pose_log_counter % 50 == 0) {
-							cout << "[POSE] x=" << Cur_rPos.coor_x 
-							     << " y=" << Cur_rPos.coor_y 
-							     << " ori=" << (int)(Cur_rPos.coor_ori * 180 / PI) << "deg"
-							     << " v=" << (int)cur_tra_vel 
-							     << " w=" << fixed << setprecision(2) << cur_rot_vel;
-						
-							if (no_change_counter > 0) {
-								cout << " ⚠️stuck=" << no_change_counter;
-							}
-							cout << endl;
+						cout << "      SLAM: traveled=" 
+						     << (int)pose_tracker->getTotalDistanceTraveled() << " cm"
+						     << " frames_since_correction=" 
+						     << pose_tracker->getFramesSinceLastCorrection() << endl;
+					}
+					
+					if (result.is_stuck) {
+						static int stuck_warn_counter = 0;
+						if (++stuck_warn_counter % 20 == 1) {
+							cout << "[WARN] EKF detects stuck! move=" 
+							     << std::fixed << std::setprecision(2) << result.actual_move 
+							     << " cm" << endl;
 						}
 					}
 				}
@@ -284,7 +297,30 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 				if (slam_ready && slam_system && obstacle_avoidance && openness_planner && astar_planner) {
 					obstacle_avoidance->detectObstacles(obstacle, Cur_rPos.coor_ori);
 					
-					// SLAM地图更新
+					// ✅✅✅ SLAM 位姿校正（使用 EKF）✅✅✅
+					if (pose_tracker && pose_tracker->shouldPerformSLAMCorrection()) {
+						POSE slam_estimated_pose;
+						double slam_confidence = 0.0;
+						
+						if (slam_system->getPoseEstimate(slam_estimated_pose, slam_confidence)) {
+							PoseTracker::SLAMCorrectionResult correction = 
+								pose_tracker->correctWithSLAM(slam_estimated_pose, slam_confidence);
+							
+							if (correction.correction_applied) {
+								PoseTracker::HighPrecisionPose hp = pose_tracker->getHighPrecisionPose();
+								Cur_rPos.coor_x = (INT16)(hp.x + 0.5);
+								Cur_rPos.coor_y = (INT16)(hp.y + 0.5);
+								Cur_rPos.coor_ori = hp.ori;
+								
+								static int correction_count = 0;
+								correction_count++;
+								cout << ">>> SLAM Correction #" << correction_count 
+								     << " | EKF fusion applied" << endl;
+							}
+						}
+					}
+					
+					// SLAM地图更新（使用校正后的激光数据）
 					if (frame_count % 10 == 0) {
 						slam_system->updateMap(Cur_rPos, obstacle);
 						
@@ -394,8 +430,8 @@ DWORD WINAPI Recv_Thre(LPVOID lpParameter)
 				}
 				else {
 					// ⚠️ 系统未就绪时停止运动，避免持续前进
-					cur_tra_vel = 0;
-					cur_rot_vel = 0;
+				 cur_tra_vel = 0;
+				 cur_rot_vel = 0;
 				}
 				
 				frame_count++;
@@ -494,6 +530,7 @@ int main()
 		CloseHandle(hThreadRecv);
 		
 		// 清理
+		if (pose_tracker) delete pose_tracker;  // ✅ 添加
 		if (astar_planner) delete astar_planner;
 		if (openness_planner) delete openness_planner;
 		if (obstacle_avoidance) delete obstacle_avoidance;

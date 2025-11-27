@@ -73,21 +73,28 @@ public:
 		double target_dist = sqrt(target_dx*target_dx + target_dy*target_dy);
 		double target_angle = atan2(target_dy, target_dx);
 
-		// 使用更精确的移动检测
+		// ✅ 修复1: 改进运动检测逻辑
 		double move_dist = MathUtils::calculateDistance(
 			cur_pose.coor_x, cur_pose.coor_y,
 			last_pose.coor_x, last_pose.coor_y);
 		
-		// 提高静止阈值，从5cm提高到10cm
-		if (move_dist < 10.0) {
-			stationary_counter++;
-			frames_in_same_area++;
-		} else {
+		// ✅ 同时检测位置变化和角度变化
+		double pose_angle_change = fabs(MathUtils::angleDifference(  // ⚠️ 改名：angle_change → pose_angle_change
+			cur_pose.coor_ori, last_pose.coor_ori));
+		
+		// ✅ 修复: 降低静止判断阈值，位置变化>3cm 或 角度变化>2度 都认为在运动
+		if (move_dist > 3.0 || pose_angle_change > 0.035) {  // 3cm 或 2度
 			stationary_counter = 0;
-			if (move_dist > 30.0) {
+			
+			// ✅ 新增: 只有大幅移动才重置区域计数器
+			if (move_dist > 20.0) {
 				frames_in_same_area = 0;
 			}
+		} else {
+			stationary_counter++;
+			frames_in_same_area++;
 		}
+		
 		last_pose = cur_pose;
 		
 		// 选择行为模式
@@ -286,8 +293,8 @@ public:
 			}
 		}
 
-		// 检测卡住
-		double angle_change = fabs(MathUtils::angleDifference(best_angle, last_best_angle));
+		// 检测卡住（使用原来的变量名）
+		double angle_change = fabs(MathUtils::angleDifference(best_angle, last_best_angle));  // ⚠️ 保持原变量名
 		
 		if (angle_change < 0.1 || stationary_counter > 20) {
 			stuck_counter++;

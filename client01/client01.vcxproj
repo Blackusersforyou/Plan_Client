@@ -141,7 +141,6 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="Plan_Client.cpp" />
-    <ClCompile Include="Plan_Client_SLAM.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="AStarPlanner.h" />
@@ -149,6 +148,7 @@
     <ClInclude Include="MathUtils.h" />
     <ClInclude Include="ObstacleAvoidance.h" />
     <ClInclude Include="OpennessPlanner.h" />
+    <ClInclude Include="PoseTracker.h" />
     <ClInclude Include="StructData.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

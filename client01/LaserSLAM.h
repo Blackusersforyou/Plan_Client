@@ -242,7 +242,7 @@ private:
 						for (int d = 0; d < 4; d++) {
 							int ny = cy + dirs[d][0];
 							int nx = cx + dirs[d][1];
-							
+						
 							if (ny >= 0 && ny < GRID_HEIGHT && 
 							    nx >= 0 && nx < GRID_WIDTH &&
 							    !visited[ny][nx] &&
@@ -749,6 +749,66 @@ public:
 				break;
 			}
 		}
+	}
+	
+	/**
+	 * ✅ 新增: 获取 SLAM 估计的位姿
+	 * @param estimated_pose 输出：估计的位姿
+	 * @param confidence 输出：估计的置信度 [0,1]
+	 * @return true 如果估计有效
+	 */
+	bool getPoseEstimate(POSE& estimated_pose, double& confidence) {
+		// 方案1: 简化版 - 返回当前机器人位姿
+		// 实际应用中应该实现地图匹配算法
+		estimated_pose = robot_pose;
+		
+		// 计算置信度（基于地图质量）
+		// 1. 计算周围已探索区域比例
+		INT16 robot_gx, robot_gy;
+		worldToGrid(robot_pose.coor_x, robot_pose.coor_y, robot_gx, robot_gy);
+		
+		int explored_count = 0;
+		int total_count = 0;
+		int radius = 20;  // 检查半径20个栅格（100cm）
+		
+		for (int di = -radius; di <= radius; di++) {
+			for (int dj = -radius; dj <= radius; dj++) {
+				int ni = robot_gy + di;
+				int nj = robot_gx + dj;
+				if (ni >= 0 && ni < GRID_HEIGHT && nj >= 0 && nj < GRID_WIDTH) {
+					total_count++;
+					if (map->grid[ni][nj].explored > 0) {
+						explored_count++;
+					}
+				}
+			}
+		}
+		
+		double exploration_ratio = (total_count > 0) ? 
+			(double)explored_count / total_count : 0.0;
+		
+		// 2. 基于探索程度计算置信度
+		// 探索越充分，置信度越高
+		confidence = 0.4 + 0.5 * exploration_ratio;  // 0.4 - 0.9
+		
+		// 3. 如果探索不足，降低置信度
+		if (exploration_ratio < 0.3) {
+			confidence = 0.3;  // 最低置信度
+		}
+		
+		// 4. 如果累计帧数过少，不进行校正
+		if (current_frame < 50) {
+			return false;  // 前50帧不进行校正
+		}
+		
+		return true;
+	}
+	
+	/**
+	 * ✅ 新增: 获取当前帧数（用于调试）
+	 */
+	int getCurrentFrame() const {
+		return current_frame;
 	}
 };
 
