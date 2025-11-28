@@ -36,6 +36,9 @@
     <ClInclude Include="PoseTracker.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="LaserOdometry.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Plan_Client.cpp">

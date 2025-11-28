@@ -8,632 +8,355 @@
 #include <iostream>
 #include <iomanip>
 #include <deque>
-#include <vector>
 
 /**
- * @brief 高精度位姿跟踪器 - 扩展卡尔曼滤波器 (EKF)
+ * @brief 简化版位姿跟踪器 - 基于命令速度积分
+ *
+ * 设计理念：
+ * 1. 命令速度是最可靠的位移来源（虽然需要缩放）
+ * 2. ICP 在低速场景下不稳定，暂时禁用
+ * 3. 提供清晰的调试输出，便于调参
+ *
+ * 关于速度缩放：
+ * 根据之前的分析，命令速度需要乘以 ~3.5 才能匹配实际移动
+ * 这可能是因为仿真器输出的速度单位或采样问题
  */
 class PoseTracker {
 public:
-	struct HighPrecisionPose {
-		double x;
-		double y;
-		double ori;
-	};
-	
-	struct AdaptiveCoefficients {
-		double vel_scale;
-		double angle_scale;
-		double confidence;
-	};
-	
-	struct UpdateResult {
-		POSE integer_pose;
-		double actual_move;
-		double actual_rotation;
-		bool is_stuck;
-		double delta_time;
-		AdaptiveCoefficients coefficients;
-		double estimated_vel;
-		double estimated_rot;
-		double position_uncertainty;
-		double orientation_uncertainty;
-		double innovation;
-	};
-	
-	struct SLAMCorrectionResult {
-		bool correction_applied;
-		double correction_x;
-		double correction_y;
-		double correction_angle;
-		double correction_distance;
-		double confidence;
-	};
-	
-	struct LaserCorrectionResult {
-		bool correction_applied;
-		int corrected_count;
-		double avg_correction;
-		double max_correction;
-	};
+    struct HighPrecisionPose {
+        double x;      // cm
+        double y;      // cm  
+        double ori;    // rad
+    };
+
+    struct UpdateResult {
+        POSE integer_pose;
+        double actual_move;
+        double actual_rotation;
+        bool is_stuck;
+        double delta_time;
+        double estimated_vel;
+        double estimated_omega;
+        double position_uncertainty;
+        double orientation_uncertainty;
+        double laser_confidence;      // 保留接口兼容
+        int laser_matched_points;     // 保留接口兼容
+        bool laser_valid;             // 保留接口兼容
+    };
 
 private:
-	HighPrecisionPose high_precision_pose_;
-	
-	LARGE_INTEGER frequency_;
-	LARGE_INTEGER last_update_time_;
-	LARGE_INTEGER last_valid_time_;
-	bool timer_initialized_;
-	int abnormal_dt_count_;
-	
-	double last_vel_;
-	double last_rot_;
-	int low_speed_frames_;
-	int stuck_counter_;
-	int frames_no_pose_change_;
-	
-	double base_vel_scale_;
-	double base_angle_scale_;
-	const double MIN_VALID_DT = 0.015;
-	const double MAX_VALID_DT = 0.100;
-	const double DEFAULT_DT = 0.030;
-	
-	int frames_since_last_slam_correction_;
-	const int SLAM_CORRECTION_INTERVAL = 100;
-	const double MAX_SLAM_CORRECTION_DISTANCE = 30.0;
-	const double SLAM_CORRECTION_BLEND_FACTOR = 0.3;
-	double total_distance_traveled_;
-	
-	// ========== ✅ 简化的 EKF 状态 ==========
-	struct EKFState {
-		double x, y, theta, v, omega;
-		
-		double pos_var;
-		double angle_var;
-		double vel_var;
-		double omega_var;
-		
-		const double PROCESS_NOISE_POS = 0.5;
-		const double PROCESS_NOISE_ANGLE = 0.01;
-		const double PROCESS_NOISE_VEL = 1.0;
-		const double PROCESS_NOISE_OMEGA = 0.05;
-		
-		const double MEASUREMENT_NOISE_POS = 4.0;
-		const double MEASUREMENT_NOISE_ANGLE = 0.05;
-		
-		EKFState() {
-			x = 0.0;
-			y = 0.0;
-			theta = 0.0;
-			v = 0.0;
-			omega = 0.0;
-			
-			pos_var = 10.0;
-			angle_var = 0.1;
-			vel_var = 5.0;
-			omega_var = 0.1;
-		}
-		
-		/**
-		 * ✅ 简化的 EKF 预测
-		 */
-		void predict(double dt, double cmd_v, double cmd_omega, 
-		            double vel_scale, double angle_scale) {
-			// 速度更新（加衰减）
-			const double VEL_DECAY = 0.95;
-			v = VEL_DECAY * v + (1 - VEL_DECAY) * cmd_v * vel_scale;
-			omega = VEL_DECAY * omega + (1 - VEL_DECAY) * cmd_omega * angle_scale;
-			
-			v = (std::max)(-50.0, (std::min)(50.0, v));
-			omega = (std::max)(-1.0, (std::min)(1.0, omega));
-			
-			// 状态预测（中点法）
-			double theta_mid = theta + 0.5 * omega * dt;
-			x += v * cos(theta_mid) * dt;
-			y += v * sin(theta_mid) * dt;
-			theta = MathUtils::normalizeAngle(theta + omega * dt);
-			
-			// 协方差预测（简化：仅对角元素）
-			pos_var += PROCESS_NOISE_POS * dt;
-			angle_var += PROCESS_NOISE_ANGLE * dt;
-			vel_var += PROCESS_NOISE_VEL * dt;
-			omega_var += PROCESS_NOISE_OMEGA * dt;
-			
-			// 防止协方差过大
-			pos_var = (std::min)(pos_var, 50.0);
-			angle_var = (std::min)(angle_var, 0.5);
-			vel_var = (std::min)(vel_var, 20.0);
-			omega_var = (std::min)(omega_var, 0.5);
-		}
-		
-		/**
-		 * ✅ 简化的 EKF 更新
-		 */
-		double update(double x_obs, double y_obs, double theta_obs, double confidence) {
-			// 新息
-			double innov_x = x_obs - x;
-			double innov_y = y_obs - y;
-			double innov_theta = MathUtils::angleDifference(theta_obs, theta);
-			
-			// 卡尔曼增益（简化）
-			double K_pos = pos_var / (pos_var + MEASUREMENT_NOISE_POS / confidence);
-			double K_angle = angle_var / (angle_var + MEASUREMENT_NOISE_ANGLE / confidence);
-			
-			K_pos = (std::max)(0.0, (std::min)(1.0, K_pos));
-			K_angle = (std::max)(0.0, (std::min)(1.0, K_angle));
-			
-			// 状态更新
-			x += K_pos * innov_x;
-			y += K_pos * innov_y;
-			theta = MathUtils::normalizeAngle(theta + K_angle * innov_theta);
-			
-			// 协方差更新
-			pos_var = (1 - K_pos) * pos_var;
-			angle_var = (1 - K_angle) * angle_var;
-			
-			// 确保最小值
-			pos_var = (std::max)(0.1, pos_var);
-			angle_var = (std::max)(0.001, angle_var);
-			
-			// 返回新息范数
-			return sqrt(innov_x*innov_x + innov_y*innov_y + innov_theta*innov_theta);
-		}
-		
-		double getPositionUncertainty() const {
-			return sqrt(2 * pos_var);  // x, y 的组合不确定性
-		}
-		
-		double getOrientationUncertainty() const {
-			return sqrt(angle_var);
-		}
-	};
-	
-	EKFState ekf_state_;
-	
-	// ========== ✅ 激光测距误差模型 ==========
-	struct LaserErrorModel {
-		double distance_scale;
-		double distance_offset;
-		double angle_noise;
-		int calibration_samples;
-		
-		LaserErrorModel() 
-			: distance_scale(1.0)
-			, distance_offset(0.0)
-			, angle_noise(0.005)
-			, calibration_samples(0) {}
-		
-		double correctDistance(double raw_distance) const {
-			if (raw_distance <= 0 || raw_distance > 5000) return raw_distance;
-			return raw_distance * distance_scale + distance_offset;
-		}
-		
-		void calibrate(const std::vector<std::pair<double, double>>& samples) {
-			if (samples.size() < 10) return;
-			
-			double sum_x = 0, sum_y = 0, sum_xx = 0, sum_xy = 0;
-			int n = 0;
-			
-			for (const auto& sample : samples) {
-				double expected = sample.first;
-				double measured = sample.second;
-				
-				if (expected > 10 && expected < 3000) {
-					sum_x += expected;
-					sum_y += measured;
-					sum_xx += expected * expected;
-					sum_xy += expected * measured;
-					n++;
-				}
-			}
-			
-			if (n > 5) {
-				distance_scale = (n * sum_xy - sum_x * sum_y) / 
-				                (n * sum_xx - sum_x * sum_x + 1e-6);
-				distance_offset = (sum_y - distance_scale * sum_x) / n;
-				
-				distance_scale = (std::max)(0.9, (std::min)(1.1, distance_scale));
-				distance_offset = (std::max)(-10.0, (std::min)(10.0, distance_offset));
-				
-				calibration_samples += n;
-			}
-		}
-	};
-	
-	LaserErrorModel laser_error_model_;
+    // 高精度位姿
+    HighPrecisionPose high_precision_pose_;
+
+    // 时间管理
+    LARGE_INTEGER frequency_;
+    LARGE_INTEGER last_update_time_;
+    bool timer_initialized_;
+
+    // 命令速度历史（用于平滑）
+    double vel_history_[5];
+    double omega_history_[5];
+    int history_idx_;
+
+    // 状态跟踪
+    int stuck_counter_;
+    int frames_no_pose_change_;
+    double total_distance_traveled_;
+    int frame_count_;
+
+    // 不确定度估计
+    double pos_uncertainty_;
+    double ori_uncertainty_;
+
+    // ========== 关键参数 ==========
+    // 速度缩放系数：根据实际测试调整
+    // 如果位姿滞后，增加这个值
+    // 如果位姿超前，减小这个值
+    double vel_scale_;      // 默认 3.5
+    double omega_scale_;    // 默认 1.2
+
+    // 速度平滑系数
+    double vel_alpha_;      // 默认 0.3（新值权重）
+
+    // 时间常量
+    const double MIN_VALID_DT = 0.010;
+    const double MAX_VALID_DT = 0.150;
+    const double DEFAULT_DT = 0.033;
 
 public:
-	PoseTracker() 
-		: timer_initialized_(false)
-		, last_vel_(0.0)
-		, last_rot_(0.0)
-		, low_speed_frames_(0)
-		, stuck_counter_(0)
-		, frames_no_pose_change_(0)
-		, base_vel_scale_(5.0)
-		, base_angle_scale_(5.0)
-		, frames_since_last_slam_correction_(0)
-		, total_distance_traveled_(0.0)
-		, abnormal_dt_count_(0)  // ✅ 初始化
-	{
-		high_precision_pose_.x = 0.0;
-		high_precision_pose_.y = 0.0;
-		high_precision_pose_.ori = 0.0;
-	}
-	
-	void initialize(const POSE& initial_pose) {
-		high_precision_pose_.x = initial_pose.coor_x;
-		high_precision_pose_.y = initial_pose.coor_y;
-		high_precision_pose_.ori = initial_pose.coor_ori;
-		
-		ekf_state_.x = initial_pose.coor_x;
-		ekf_state_.y = initial_pose.coor_y;
-		ekf_state_.theta = initial_pose.coor_ori;
-		ekf_state_.v = 0.0;
-		ekf_state_.omega = 0.0;
-		ekf_state_.pos_var = 10.0;
-		ekf_state_.angle_var = 0.1;
-		ekf_state_.vel_var = 5.0;
-		ekf_state_.omega_var = 0.1;
-		
-		if (!timer_initialized_) {
-			QueryPerformanceFrequency(&frequency_);
-			QueryPerformanceCounter(&last_update_time_);
-			last_valid_time_ = last_update_time_;
-			timer_initialized_ = true;
-		}
-		
-		last_vel_ = 0.0;
-		last_rot_ = 0.0;
-		low_speed_frames_ = 0;
-		stuck_counter_ = 0;
-		frames_no_pose_change_ = 0;
-		frames_since_last_slam_correction_ = 0;
-		total_distance_traveled_ = 0.0;
-		abnormal_dt_count_ = 0;
-		
-		std::cout << "[PoseTracker] Initialized with EKF" << std::endl;
-		std::cout << "  Position: (" << high_precision_pose_.x << ", " 
-		          << high_precision_pose_.y << "), ori: " 
-		          << (high_precision_pose_.ori * 180 / PI) << " deg" << std::endl;
-	}
-	
-	void reset(const POSE& new_pose) {
-		high_precision_pose_.x = new_pose.coor_x;
-		high_precision_pose_.y = new_pose.coor_y;
-		high_precision_pose_.ori = new_pose.coor_ori;
-		
-		ekf_state_.x = new_pose.coor_x;
-		ekf_state_.y = new_pose.coor_y;
-		ekf_state_.theta = new_pose.coor_ori;
-		ekf_state_.v = 0.0;
-		ekf_state_.omega = 0.0;
-		ekf_state_.pos_var = 10.0;
-		ekf_state_.angle_var = 0.1;
-		ekf_state_.vel_var = 5.0;
-		ekf_state_.omega_var = 0.1;
-		
-		stuck_counter_ = 0;
-		frames_no_pose_change_ = 0;
-		frames_since_last_slam_correction_ = 0;
-		total_distance_traveled_ = 0.0;
-		abnormal_dt_count_ = 0;
-		
-		std::cout << "[PoseTracker] Reset with EKF" << std::endl;
-	}
-	
-	UpdateResult update(double cmd_linear_vel, double cmd_angular_vel, 
-	                    bool is_avoiding_obstacle, double obstacle_distance) {
-		UpdateResult result;
-		
-		double dt = getActualDeltaTime();
-		result.delta_time = dt;
-		
-		AdaptiveCoefficients coeff = computeAdaptiveCoefficients(
-			cmd_linear_vel, cmd_angular_vel, is_avoiding_obstacle, 
-			obstacle_distance, stuck_counter_);
-		result.coefficients = coeff;
-		
-		double old_x = ekf_state_.x;
-		double old_y = ekf_state_.y;
-		double old_theta = ekf_state_.theta;
-		
-		// ✅ EKF 预测
-		ekf_state_.predict(dt, cmd_linear_vel, cmd_angular_vel, 
-		                  coeff.vel_scale, coeff.angle_scale);
-		
-		high_precision_pose_.x = ekf_state_.x;
-		high_precision_pose_.y = ekf_state_.y;
-		high_precision_pose_.ori = ekf_state_.theta;
-		
-		result.integer_pose.coor_x = (INT16)(ekf_state_.x + 0.5);
-		result.integer_pose.coor_y = (INT16)(ekf_state_.y + 0.5);
-		result.integer_pose.coor_ori = ekf_state_.theta;
-		
-		result.actual_move = MathUtils::calculateDistance(
-			old_x, old_y, ekf_state_.x, ekf_state_.y);
-		result.actual_rotation = fabs(
-			MathUtils::angleDifference(ekf_state_.theta, old_theta));
-		
-		result.estimated_vel = ekf_state_.v;
-		result.estimated_rot = ekf_state_.omega;
-		
-		result.position_uncertainty = ekf_state_.getPositionUncertainty();
-		result.orientation_uncertainty = ekf_state_.getOrientationUncertainty();
-		result.innovation = 0.0;
-		
-		total_distance_traveled_ += result.actual_move;
-		frames_since_last_slam_correction_++;
-		
-		updateStuckDetection(result, cmd_linear_vel, cmd_angular_vel);
-		
-		last_vel_ = cmd_linear_vel;
-		last_rot_ = cmd_angular_vel;
-		
-		return result;
-	}
-	
-	SLAMCorrectionResult correctWithSLAM(const POSE& slam_pose, double slam_confidence = 0.8) {
-		SLAMCorrectionResult result;
-		result.correction_applied = false;
-		
-		double dx = slam_pose.coor_x - ekf_state_.x;
-		double dy = slam_pose.coor_y - ekf_state_.y;
-		double distance = sqrt(dx * dx + dy * dy);
-		double angle_diff = MathUtils::angleDifference(slam_pose.coor_ori, ekf_state_.theta);
-		
-		result.correction_x = dx;
-		result.correction_y = dy;
-		result.correction_angle = angle_diff;
-		result.correction_distance = distance;
-		
-		if (distance > MAX_SLAM_CORRECTION_DISTANCE) {
-			std::cout << "[SLAM Correction] REJECTED: Distance too large (" 
-			          << (int)distance << " cm)" << std::endl;
-			return result;
-		}
-		
-		if (distance < 2.0 && fabs(angle_diff) < 0.05) {
-			return result;
-		}
-		
-		// ✅ EKF 更新
-		double innovation = ekf_state_.update(
-			slam_pose.coor_x, slam_pose.coor_y, slam_pose.coor_ori, slam_confidence);
-		
-		high_precision_pose_.x = ekf_state_.x;
-		high_precision_pose_.y = ekf_state_.y;
-		high_precision_pose_.ori = ekf_state_.theta;
-		
-		result.correction_applied = true;
-		result.confidence = slam_confidence;
-		
-		total_distance_traveled_ = 0.0;
-		frames_since_last_slam_correction_ = 0;
-		
-		std::cout << "[SLAM Correction] APPLIED with EKF:" << std::endl;
-		std::cout << "  Position: dx=" << std::fixed << std::setprecision(1) 
-		          << dx << " dy=" << dy << " (dist=" << (int)distance << " cm)" << std::endl;
-		std::cout << "  Innovation: " << std::setprecision(2) << innovation << std::endl;
-		std::cout << "  Uncertainty: pos=" << ekf_state_.getPositionUncertainty() 
-		          << " cm, ori=" << (ekf_state_.getOrientationUncertainty() * 180 / PI) << " deg" << std::endl;
-		
-		return result;
-	}
-	
-	LaserCorrectionResult correctLaserData(INT16* laser_data) {
-		LaserCorrectionResult result;
-		result.correction_applied = false;
-		result.corrected_count = 0;
-		result.avg_correction = 0.0;
-		result.max_correction = 0.0;
-		
-		double total_correction = 0.0;
-		
-		for (int i = 0; i < 360; i++) {
-			if (laser_data[i] > 0 && laser_data[i] < 5000) {
-				double raw_distance = laser_data[i];
-				double corrected_distance = laser_error_model_.correctDistance(raw_distance);
-				
-				double correction = fabs(corrected_distance - raw_distance);
-				if (correction > 0.1) {
-					laser_data[i] = (INT16)(corrected_distance + 0.5);
-					result.corrected_count++;
-					total_correction += correction;
-					
-					if (correction > result.max_correction) {
-						result.max_correction = correction;
-					}
-				}
-			}
-		}
-		
-		if (result.corrected_count > 0) {
-			result.correction_applied = true;
-			result.avg_correction = total_correction / result.corrected_count;
-		}
-		
-		return result;
-	}
-	
-	void calibrateLaserModel(const std::vector<std::pair<double, double>>& calibration_samples) {
-		laser_error_model_.calibrate(calibration_samples);
-		
-		if (laser_error_model_.calibration_samples > 0) {
-			std::cout << "[Laser Calibration] Updated:" << std::endl;
-			std::cout << "  Scale: " << std::fixed << std::setprecision(4) 
-			          << laser_error_model_.distance_scale << std::endl;
-			std::cout << "  Offset: " << laser_error_model_.distance_offset << " cm" << std::endl;
-		}
-	}
-	
-	bool shouldPerformSLAMCorrection() const {
-		if (abnormal_dt_count_ >= 5) return true;
-		if (frames_since_last_slam_correction_ >= SLAM_CORRECTION_INTERVAL && 
-		    total_distance_traveled_ >= 100.0) return true;
-		if (frames_since_last_slam_correction_ >= 50 && 
-		    total_distance_traveled_ >= 30.0) return true;
-		if (ekf_state_.getPositionUncertainty() > 20.0) return true;
-		return false;
-	}
-	
-	double getTotalDistanceTraveled() const { return total_distance_traveled_; }
-	int getFramesSinceLastCorrection() const { return frames_since_last_slam_correction_; }
-	HighPrecisionPose getHighPrecisionPose() const { return high_precision_pose_; }
-	int getStuckCounter() const { return stuck_counter_; }
-	
-	void printStatus(const UpdateResult& result, 
-	                 const AdaptiveCoefficients& coeff,
-	                 double obstacle_dist) const {
-		std::cout << "[POSE] x=" << result.integer_pose.coor_x 
-		          << " y=" << result.integer_pose.coor_y 
-		          << " ori=" << (int)(result.integer_pose.coor_ori * 180 / PI) << " deg" << std::endl;
-		
-		std::cout << "      EKF: x=" << std::fixed << std::setprecision(2) 
-		          << ekf_state_.x << " y=" << ekf_state_.y
-		          << " | dt=" << (result.delta_time * 1000) << " ms" << std::endl;
-		
-		std::cout << "      Coeff: v=" << coeff.vel_scale
-		          << " angle=" << coeff.angle_scale
-		          << " | stuck=" << stuck_counter_ << std::endl;
-		
-		std::cout << "      Delta: move=" << std::setprecision(3) << result.actual_move << " cm"
-		          << " rot=" << (int)(result.actual_rotation * 180 / PI) << " deg" << std::endl;
-		
-		std::cout << "      Uncertainty: pos=" << std::setprecision(2) << result.position_uncertainty 
-		          << " cm ori=" << (result.orientation_uncertainty * 180 / PI) << " deg" << std::endl;
-	}
+    PoseTracker()
+        : timer_initialized_(false)
+        , history_idx_(0)
+        , stuck_counter_(0)
+        , frames_no_pose_change_(0)
+        , total_distance_traveled_(0.0)
+        , frame_count_(0)
+        , pos_uncertainty_(10.0)
+        , ori_uncertainty_(0.1)
+        , vel_scale_(3.5)      // 核心参数！
+        , omega_scale_(1.2)
+        , vel_alpha_(0.3)
+    {
+        high_precision_pose_.x = 0;
+        high_precision_pose_.y = 0;
+        high_precision_pose_.ori = 0;
+
+        for (int i = 0; i < 5; i++) {
+            vel_history_[i] = 0;
+            omega_history_[i] = 0;
+        }
+
+        std::cout << "[PoseTracker] Initialized (Command Velocity Based)" << std::endl;
+        std::cout << "  vel_scale: " << vel_scale_ << std::endl;
+        std::cout << "  omega_scale: " << omega_scale_ << std::endl;
+        std::cout << "  vel_alpha: " << vel_alpha_ << std::endl;
+    }
+
+    /**
+     * @brief 设置速度缩放系数
+     * @param vel_scale 线速度缩放（如果位姿滞后就增大）
+     * @param omega_scale 角速度缩放
+     */
+    void setScaleFactors(double vel_scale, double omega_scale) {
+        vel_scale_ = vel_scale;
+        omega_scale_ = omega_scale;
+        std::cout << "[PoseTracker] Scale factors updated: vel=" << vel_scale
+            << " omega=" << omega_scale << std::endl;
+    }
+
+    void setFusionWeights(double laser_weight, double cmd_weight) {
+        // 保留接口兼容，但不使用
+        (void)laser_weight;
+        (void)cmd_weight;
+    }
+
+    void initialize(const POSE& initial_pose) {
+        high_precision_pose_.x = initial_pose.coor_x;
+        high_precision_pose_.y = initial_pose.coor_y;
+        high_precision_pose_.ori = initial_pose.coor_ori;
+
+        if (!timer_initialized_) {
+            QueryPerformanceFrequency(&frequency_);
+            QueryPerformanceCounter(&last_update_time_);
+            timer_initialized_ = true;
+        }
+
+        stuck_counter_ = 0;
+        frames_no_pose_change_ = 0;
+        total_distance_traveled_ = 0;
+        frame_count_ = 0;
+        pos_uncertainty_ = 10.0;
+        ori_uncertainty_ = 0.1;
+        history_idx_ = 0;
+
+        for (int i = 0; i < 5; i++) {
+            vel_history_[i] = 0;
+            omega_history_[i] = 0;
+        }
+
+        std::cout << "[PoseTracker] Initialized at ("
+            << initial_pose.coor_x << ", " << initial_pose.coor_y
+            << "), ori=" << MathUtils::radToDeg(initial_pose.coor_ori)
+            << " deg" << std::endl;
+    }
+
+    void reset(const POSE& new_pose) {
+        high_precision_pose_.x = new_pose.coor_x;
+        high_precision_pose_.y = new_pose.coor_y;
+        high_precision_pose_.ori = new_pose.coor_ori;
+
+        stuck_counter_ = 0;
+        frames_no_pose_change_ = 0;
+        total_distance_traveled_ = 0;
+        frame_count_ = 0;
+        pos_uncertainty_ = 10.0;
+        ori_uncertainty_ = 0.1;
+
+        for (int i = 0; i < 5; i++) {
+            vel_history_[i] = 0;
+            omega_history_[i] = 0;
+        }
+    }
+
+    /**
+     * @brief 核心更新方法 - 基于命令速度积分
+     *
+     * @param laser_data 激光数据（暂不使用，保留接口）
+     * @param cmd_vel 命令线速度 (cm/s)
+     * @param cmd_omega 命令角速度 (rad/s)
+     * @return 更新结果
+     */
+    UpdateResult update(INT16* laser_data, double cmd_vel, double cmd_omega) {
+        UpdateResult result;
+        frame_count_++;
+
+        // 忽略激光数据，避免编译警告
+        (void)laser_data;
+
+        // 获取时间步长
+        double dt = getActualDeltaTime();
+        result.delta_time = dt;
+
+        double old_x = high_precision_pose_.x;
+        double old_y = high_precision_pose_.y;
+        double old_theta = high_precision_pose_.ori;
+
+        // ========== 速度平滑 ==========
+        vel_history_[history_idx_] = cmd_vel;
+        omega_history_[history_idx_] = cmd_omega;
+        history_idx_ = (history_idx_ + 1) % 5;
+
+        // 加权平均（最近的权重更高）
+        double smoothed_vel = 0;
+        double smoothed_omega = 0;
+        double weights[5] = { 0.35, 0.25, 0.20, 0.12, 0.08 };
+        for (int i = 0; i < 5; i++) {
+            int idx = (history_idx_ - 1 - i + 5) % 5;
+            smoothed_vel += vel_history_[idx] * weights[i];
+            smoothed_omega += omega_history_[idx] * weights[i];
+        }
+
+        // ========== 缩放速度 ==========
+        double scaled_v = smoothed_vel * vel_scale_;
+        double scaled_omega = smoothed_omega * omega_scale_;
+
+        // ========== 中点法积分 ==========
+        // 先计算中点角度，提高精度
+        double theta_mid = high_precision_pose_.ori + 0.5 * scaled_omega * dt;
+
+        double dx = scaled_v * cos(theta_mid) * dt;
+        double dy = scaled_v * sin(theta_mid) * dt;
+        double dtheta = scaled_omega * dt;
+
+        // ========== 更新位姿 ==========
+        high_precision_pose_.x += dx;
+        high_precision_pose_.y += dy;
+        high_precision_pose_.ori = MathUtils::normalizeAngle(high_precision_pose_.ori + dtheta);
+
+        // 边界检查
+        high_precision_pose_.x = MathUtils::clamp(high_precision_pose_.x, 0.0, static_cast<double>(MAP_WIDTH));
+        high_precision_pose_.y = MathUtils::clamp(high_precision_pose_.y, 0.0, static_cast<double>(MAP_HEIGHT));
+
+        // ========== 不确定度更新 ==========
+        // 速度越大，不确定度增长越快
+        pos_uncertainty_ += fabs(scaled_v) * dt * 0.05;
+        ori_uncertainty_ += fabs(scaled_omega) * dt * 0.1;
+
+        // 限制不确定度
+        pos_uncertainty_ = MathUtils::clamp(pos_uncertainty_, 1.0, 100.0);
+        ori_uncertainty_ = MathUtils::clamp(ori_uncertainty_, 0.01, 1.0);
+
+        // ========== 填充结果 ==========
+        result.integer_pose.coor_x = static_cast<INT16>(high_precision_pose_.x + 0.5);
+        result.integer_pose.coor_y = static_cast<INT16>(high_precision_pose_.y + 0.5);
+        result.integer_pose.coor_ori = high_precision_pose_.ori;
+
+        result.actual_move = MathUtils::calculateDistance(old_x, old_y,
+            high_precision_pose_.x,
+            high_precision_pose_.y);
+        result.actual_rotation = fabs(MathUtils::angleDifference(high_precision_pose_.ori, old_theta));
+
+        result.estimated_vel = result.actual_move / dt;
+        result.estimated_omega = result.actual_rotation / dt;
+
+        result.position_uncertainty = pos_uncertainty_;
+        result.orientation_uncertainty = ori_uncertainty_;
+
+        // ICP 相关字段（保持接口兼容）
+        result.laser_valid = false;
+        result.laser_confidence = 0;
+        result.laser_matched_points = 0;
+
+        // 更新统计
+        total_distance_traveled_ += result.actual_move;
+
+        // 卡住检测
+        updateStuckDetection(result, cmd_vel, cmd_omega);
+
+        return result;
+    }
+
+    void printStatus(const UpdateResult& result) const {
+        std::cout << "[POSE_] x=" << result.integer_pose.coor_x
+            << " y=" << result.integer_pose.coor_y
+            << " ori=" << static_cast<int>(MathUtils::radToDeg(result.integer_pose.coor_ori))
+            << " deg" << std::endl;
+
+        std::cout << "         HP: x=" << std::fixed << std::setprecision(1)
+            << high_precision_pose_.x << " y=" << high_precision_pose_.y
+            << " | dt=" << std::setprecision(1) << (result.delta_time * 1000) << " ms" << std::endl;
+
+        std::cout << "         Move: " << std::setprecision(2) << result.actual_move << " cm"
+            << " rot=" << static_cast<int>(MathUtils::radToDeg(result.actual_rotation)) << " deg"
+            << " | v_est=" << std::setprecision(1) << result.estimated_vel
+            << " w_est=" << result.estimated_omega << std::endl;
+
+        std::cout << "         Uncertainty: pos=" << std::setprecision(1) << pos_uncertainty_
+            << " cm ori=" << MathUtils::radToDeg(ori_uncertainty_) << " deg"
+            << " | stuck=" << stuck_counter_
+            << " | scale=" << vel_scale_ << std::endl;
+    }
+
+    // ========== Getter 方法 ==========
+    HighPrecisionPose getHighPrecisionPose() const { return high_precision_pose_; }
+    POSE getPose() const {
+        POSE p;
+        p.coor_x = static_cast<INT16>(high_precision_pose_.x + 0.5);
+        p.coor_y = static_cast<INT16>(high_precision_pose_.y + 0.5);
+        p.coor_ori = high_precision_pose_.ori;
+        return p;
+    }
+
+    double getTotalDistanceTraveled() const { return total_distance_traveled_; }
+    int getStuckCounter() const { return stuck_counter_; }
+    double getPositionUncertainty() const { return pos_uncertainty_; }
+    double getOrientationUncertainty() const { return ori_uncertainty_; }
+
+    bool shouldPerformSLAMCorrection() const {
+        return false;
+    }
 
 private:
-	AdaptiveCoefficients computeAdaptiveCoefficients(
-		double velocity, double angular_velocity, 
-		bool is_avoiding_obstacle, double obstacle_distance,
-		int stuck_counter) {
-		
-		AdaptiveCoefficients coeff;
-		
-		if (abnormal_dt_count_ > 0 && abnormal_dt_count_ < 20) {
-			coeff.vel_scale = base_vel_scale_ * 0.6;
-			coeff.angle_scale = base_angle_scale_ * 0.6;
-			coeff.confidence = 0.4;
-			return coeff;
-		}
-		
-		if (stuck_counter > 10) {
-			coeff.vel_scale = base_vel_scale_ * 1.5;
-			coeff.angle_scale = base_angle_scale_ * 1.5;
-			coeff.confidence = 0.5;
-			return coeff;
-		}
-		
-		if (velocity > 0 && velocity < 10.0) {
-			coeff.vel_scale = base_vel_scale_ * 1.4;
-			coeff.angle_scale = base_angle_scale_ * 1.1;
-			coeff.confidence = 0.85;
-			return coeff;
-		}
-		
-		if (is_avoiding_obstacle && obstacle_distance < 30.0) {
-			coeff.vel_scale = base_vel_scale_ * 0.5;
-			coeff.angle_scale = base_angle_scale_ * 0.5;
-			coeff.confidence = 0.4;
-			return coeff;
-		}
-		
-		if (is_avoiding_obstacle && obstacle_distance < 50.0) {
-			coeff.vel_scale = base_vel_scale_ * 0.70;
-			coeff.angle_scale = base_angle_scale_ * 0.65;
-			coeff.confidence = 0.6;
-			return coeff;
-		}
-		
-		if (fabs(angular_velocity) > 0.6) {
-			coeff.vel_scale = base_vel_scale_ * 0.65;
-			coeff.angle_scale = base_angle_scale_ * 0.50;
-			coeff.confidence = 0.65;
-			return coeff;
-		}
-		
-		if (fabs(angular_velocity) > 0.4) {
-			coeff.vel_scale = base_vel_scale_ * 0.80;
-			coeff.angle_scale = base_angle_scale_ * 0.65;
-			coeff.confidence = 0.7;
-			return coeff;
-		}
-		
-		coeff.vel_scale = base_vel_scale_;
-		coeff.angle_scale = base_angle_scale_;
-		coeff.confidence = 0.9;
-		
-		return coeff;
-	}
-	
-	void updateStuckDetection(UpdateResult& result, double cmd_vel, double cmd_rot) {
-		bool pose_changed = (result.actual_move > 0.5 || result.actual_rotation > 0.01);
-		
-		if (!pose_changed && (fabs(cmd_vel) > 2.0 || fabs(cmd_rot) > 0.05)) {
-			frames_no_pose_change_++;
-			stuck_counter_++;
-		} else {
-			frames_no_pose_change_ = 0;
-			if (stuck_counter_ > 0) stuck_counter_--;
-		}
-		
-		result.is_stuck = (stuck_counter_ > 5);
-	}
-	
-	double getActualDeltaTime() {
-		if (!timer_initialized_) {
-			QueryPerformanceFrequency(&frequency_);
-			QueryPerformanceCounter(&last_update_time_);
-			last_valid_time_ = last_update_time_;
-			timer_initialized_ = true;
-			return DEFAULT_DT;
-		}
-		
-		LARGE_INTEGER current_time;
-		QueryPerformanceCounter(&current_time);
-		
-		double dt = (double)(current_time.QuadPart - last_update_time_.QuadPart) 
-		            / (double)frequency_.QuadPart;
-		
-		bool is_abnormal = false;
-		
-		if (dt < MIN_VALID_DT) {
-			is_abnormal = true;
-			dt = DEFAULT_DT * 0.5;
-		} 
-		else if (dt > MAX_VALID_DT) {
-			is_abnormal = true;
-			
-			LARGE_INTEGER time_since_last_valid;
-			time_since_last_valid.QuadPart = current_time.QuadPart - last_valid_time_.QuadPart;
-			double time_since_valid = (double)time_since_last_valid.QuadPart / (double)frequency_.QuadPart;
-			
-			if (time_since_valid < MAX_VALID_DT * 2) {
-				dt = time_since_valid;
-			} else {
-				dt = DEFAULT_DT;
-			}
-			
-			abnormal_dt_count_++;
-			if (abnormal_dt_count_ % 10 == 1) {
-				std::cout << "[WARN] Abnormal dt (count=" << abnormal_dt_count_ 
-				          << "), smoothed to " << (dt * 1000) << " ms" << std::endl;
-			}
-		}
-		
-		last_update_time_ = current_time;
-		
-		if (!is_abnormal) {
-			last_valid_time_ = current_time;
-			if (abnormal_dt_count_ > 0) {
-				abnormal_dt_count_ = 0;
-			}
-		}
-		
-		return dt;
-	}
+    void updateStuckDetection(UpdateResult& result, double cmd_vel, double cmd_omega) {
+        double expected_move = fabs(cmd_vel * vel_scale_) * result.delta_time * 0.5;
+        double move_threshold = (std::max)(0.2, expected_move * 0.2);
+
+        bool pose_changed = (result.actual_move > move_threshold || result.actual_rotation > 0.01);
+        bool command_active = (fabs(cmd_vel) > 2.0 || fabs(cmd_omega) > 0.03);
+
+        if (!pose_changed && command_active) {
+            frames_no_pose_change_++;
+            stuck_counter_++;
+        }
+        else if (pose_changed) {
+            frames_no_pose_change_ = 0;
+            stuck_counter_ = (std::max)(0, stuck_counter_ - 2);
+        }
+
+        result.is_stuck = (stuck_counter_ > 20);
+    }
+
+    double getActualDeltaTime() {
+        if (!timer_initialized_) {
+            QueryPerformanceFrequency(&frequency_);
+            QueryPerformanceCounter(&last_update_time_);
+            timer_initialized_ = true;
+            return DEFAULT_DT;
+        }
+
+        LARGE_INTEGER current_time;
+        QueryPerformanceCounter(&current_time);
+
+        double dt = static_cast<double>(current_time.QuadPart - last_update_time_.QuadPart)
+            / static_cast<double>(frequency_.QuadPart);
+
+        last_update_time_ = current_time;
+
+        if (dt < MIN_VALID_DT) dt = MIN_VALID_DT;
+        if (dt > MAX_VALID_DT) dt = MAX_VALID_DT;
+
+        return dt;
+    }
 };
 
 #endif // POSE_TRACKER_H
